@@ -19,6 +19,8 @@
  */
 #define MALI400_L2_CACHE_REGISTERS_SIZE 0x30
 
+int mali_l2_registers_size = MALI400_L2_CACHE_REGISTERS_SIZE;
+
 #define MALI_MAX_NUMBER_OF_L2_CACHE_CORES  3
 
 /**
