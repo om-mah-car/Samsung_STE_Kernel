@@ -84,6 +84,7 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+ATOMIC_NOTIFIER_HEAD(migration_notifier_head);
 
 #if defined(CONFIG_SAMSUNG_ADD_GAFORENSICINFO)
 #include <mach/sec_gaf.h>

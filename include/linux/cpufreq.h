@@ -56,12 +56,17 @@ static inline int cpufreq_unregister_notifier(struct notifier_block *nb,
 #define CPUFREQ_POLICY_POWERSAVE	(1)
 #define CPUFREQ_POLICY_PERFORMANCE	(2)
 
+/* Minimum frequency cutoff to notify the userspace about cpu utilization
+ * changes */
+#define MIN_CPU_UTIL_NOTIFY   40
+
 /* Frequency values here are CPU kHz so that hardware which doesn't run
  * with some frequencies can complain without having to guess what per
  * cent / per mille means.
  * Maximum transition latency is in nanoseconds - if it's unknown,
  * CPUFREQ_ETERNAL shall be used.
  */
+
 
 struct cpufreq_governor;
 
@@ -96,6 +101,7 @@ struct cpufreq_policy {
 	unsigned int		max;    /* in kHz */
 	unsigned int		cur;    /* in kHz, only needed if cpufreq
 					 * governors are used */
+	unsigned int            util;  /* CPU utilization at max frequency */
 	unsigned int		policy; /* see above */
 	struct cpufreq_governor	*governor; /* see below */
 
@@ -196,6 +202,13 @@ extern int __cpufreq_driver_target(struct cpufreq_policy *policy,
 extern int __cpufreq_driver_getavg(struct cpufreq_policy *policy,
 				   unsigned int cpu);
 
+
+int lock_policy_rwsem_read(int cpu);
+int lock_policy_rwsem_write(int cpu);
+void unlock_policy_rwsem_read(int cpu);
+void unlock_policy_rwsem_write(int cpu);
+
+
 int cpufreq_register_governor(struct cpufreq_governor *governor);
 void cpufreq_unregister_governor(struct cpufreq_governor *governor);
 
@@ -255,6 +268,8 @@ int cpufreq_unregister_driver(struct cpufreq_driver *driver_data);
 
 
 void cpufreq_notify_transition(struct cpufreq_freqs *freqs, unsigned int state);
+void cpufreq_notify_utilization(struct cpufreq_policy *policy,
+                unsigned int util);
 
 
 static inline void cpufreq_verify_within_limits(struct cpufreq_policy *policy, unsigned int min, unsigned int max)

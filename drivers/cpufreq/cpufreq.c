@@ -68,7 +68,7 @@ static DEFINE_PER_CPU(int, cpufreq_policy_cpu);
 static DEFINE_PER_CPU(struct rw_semaphore, cpu_policy_rwsem);
 
 #define lock_policy_rwsem(mode, cpu)					\
-static int lock_policy_rwsem_##mode					\
+int lock_policy_rwsem_##mode					\
 (int cpu)								\
 {									\
 	int policy_cpu = per_cpu(cpufreq_policy_cpu, cpu);		\
@@ -83,22 +83,26 @@ static int lock_policy_rwsem_##mode					\
 }
 
 lock_policy_rwsem(read, cpu);
+EXPORT_SYMBOL_GPL(lock_policy_rwsem_read);
 
 lock_policy_rwsem(write, cpu);
+EXPORT_SYMBOL_GPL(lock_policy_rwsem_write);
 
-static void unlock_policy_rwsem_read(int cpu)
+void unlock_policy_rwsem_read(int cpu)
 {
 	int policy_cpu = per_cpu(cpufreq_policy_cpu, cpu);
 	BUG_ON(policy_cpu == -1);
 	up_read(&per_cpu(cpu_policy_rwsem, policy_cpu));
 }
+EXPORT_SYMBOL_GPL(unlock_policy_rwsem_read);
 
-static void unlock_policy_rwsem_write(int cpu)
+void unlock_policy_rwsem_write(int cpu)
 {
 	int policy_cpu = per_cpu(cpufreq_policy_cpu, cpu);
 	BUG_ON(policy_cpu == -1);
 	up_write(&per_cpu(cpu_policy_rwsem, policy_cpu));
 }
+EXPORT_SYMBOL_GPL(unlock_policy_rwsem_write);
 
 
 /* internal prototypes */
@@ -275,6 +279,26 @@ void cpufreq_notify_transition(struct cpufreq_freqs *freqs, unsigned int state)
 	}
 }
 EXPORT_SYMBOL_GPL(cpufreq_notify_transition);
+
+/**
+ * cpufreq_notify_utilization - notify CPU userspace about CPU utilization
+ * change
+ *
+ * This function is called everytime the CPU load is evaluated by the
+ * ondemand governor. It notifies userspace of cpu load changes via sysfs.
+ */
+void cpufreq_notify_utilization(struct cpufreq_policy *policy,
+                unsigned int util)
+{
+        if (policy)
+                policy->util = util;
+
+        if (policy->util >= MIN_CPU_UTIL_NOTIFY)
+                sysfs_notify(&policy->kobj, NULL, "cpu_utilization");
+
+}
+
+
 
 
 

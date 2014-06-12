@@ -15,6 +15,8 @@
  * used by rstatd/perfmeter
  */
 
+
+
 struct cpu_usage_stat {
 	cputime64_t user;
 	cputime64_t nice;
@@ -28,6 +30,8 @@ struct cpu_usage_stat {
 	cputime64_t guest_nice;
 };
 
+
+
 struct kernel_stat {
 	struct cpu_usage_stat	cpustat;
 #ifndef CONFIG_GENERIC_HARDIRQS
@@ -36,12 +40,12 @@ struct kernel_stat {
 	unsigned long irqs_sum;
 	unsigned int softirqs[NR_SOFTIRQS];
 };
-
 DECLARE_PER_CPU(struct kernel_stat, kstat);
 
-#define kstat_cpu(cpu)	per_cpu(kstat, cpu)
+
 /* Must have preemption disabled for this to be meaningful. */
 #define kstat_this_cpu	__get_cpu_var(kstat)
+#define kstat_cpu(cpu)	per_cpu(kstat, cpu)
 
 extern unsigned long long nr_context_switches(void);
 
