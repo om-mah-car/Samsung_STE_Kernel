@@ -27,6 +27,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/input.h>
 #include <linux/i2c.h>
 #include <linux/miscdevice.h>
@@ -449,6 +450,13 @@ static unsigned int press_timeout = DEFAULT_PRESS_TIMEOUT; /* press_timeout in m
 
 static bool doubletap2wake = false;
 #endif /* TOUCH_DT2W */
+
+#ifdef TOUCH_BOOSTER
+static bool touchboost_active = true;
+module_param(touchboost_active, bool, 0644);
+static unsigned int touchboost_freq = 400000;
+module_param(touchboost_freq, uint, 0644);
+#endif
 
 static void fw_update(void *device_data);
 static void get_fw_ver_bin(void *device_data);
@@ -1551,20 +1559,22 @@ static void bt404_ts_report_touch_data(struct bt404_ts_data *data,
 		input_sync(data->input_dev_ts);
 
 #if defined(TOUCH_BOOSTER)
-		data->finger_cnt = 0;
+		if (touchboost_active) {
+			data->finger_cnt = 0;
 
-		prcmu_qos_update_requirement(
-			PRCMU_QOS_APE_OPP,
-			(char *)data->client->name,
-			PRCMU_QOS_DEFAULT_VALUE);
-		prcmu_qos_update_requirement(
-			PRCMU_QOS_DDR_OPP,
-			(char *)data->client->name,
-			PRCMU_QOS_DEFAULT_VALUE);
-		prcmu_qos_update_requirement(
-			PRCMU_QOS_ARM_KHZ,
-			(char *)data->client->name,
-			PRCMU_QOS_DEFAULT_VALUE);
+			prcmu_qos_update_requirement(
+				PRCMU_QOS_APE_OPP,
+				(char *)data->client->name,
+				PRCMU_QOS_DEFAULT_VALUE);
+			prcmu_qos_update_requirement(
+				PRCMU_QOS_DDR_OPP,
+				(char *)data->client->name,
+				PRCMU_QOS_DEFAULT_VALUE);
+			prcmu_qos_update_requirement(
+				PRCMU_QOS_ARM_KHZ,
+				(char *)data->client->name,
+				PRCMU_QOS_DEFAULT_VALUE);
+		}
 #endif
 		return;
 	}
@@ -1626,22 +1636,24 @@ static void bt404_ts_report_touch_data(struct bt404_ts_data *data,
 			input_mt_report_slot_state(data->input_dev_ts,
 						   MT_TOOL_FINGER, false);
 #if defined(TOUCH_BOOSTER)
-			if (data->finger_cnt > 0)
-				data->finger_cnt--;
+			if (touchboost_active) {
+				if (data->finger_cnt > 0)
+					data->finger_cnt--;
 
-			if (!data->finger_cnt) {
-				prcmu_qos_update_requirement(
-					PRCMU_QOS_APE_OPP,
-					(char *)data->client->name,
-					PRCMU_QOS_DEFAULT_VALUE);
-				prcmu_qos_update_requirement(
-					PRCMU_QOS_DDR_OPP,
-					(char *)data->client->name,
-					PRCMU_QOS_DEFAULT_VALUE);
-				prcmu_qos_update_requirement(
-					PRCMU_QOS_ARM_KHZ,
-					(char *)data->client->name,
-					PRCMU_QOS_DEFAULT_VALUE);
+				if (!data->finger_cnt) {
+					prcmu_qos_update_requirement(
+						PRCMU_QOS_APE_OPP,
+						(char *)data->client->name,
+						PRCMU_QOS_DEFAULT_VALUE);
+					prcmu_qos_update_requirement(
+						PRCMU_QOS_DDR_OPP,
+						(char *)data->client->name,
+						PRCMU_QOS_DEFAULT_VALUE);
+					prcmu_qos_update_requirement(
+						PRCMU_QOS_ARM_KHZ,
+						(char *)data->client->name,
+						PRCMU_QOS_DEFAULT_VALUE);
+				}
 			}
 #endif
 			continue;
@@ -1655,22 +1667,26 @@ static void bt404_ts_report_touch_data(struct bt404_ts_data *data,
 
 			if (cur_down) {
 #if defined(TOUCH_BOOSTER)
-				if (!data->finger_cnt) {
-					prcmu_qos_update_requirement(
-						PRCMU_QOS_APE_OPP,
-						(char *)data->client->name,
-						PRCMU_QOS_APE_OPP_MAX);
-					prcmu_qos_update_requirement(
-						PRCMU_QOS_DDR_OPP,
-						(char *)data->client->name,
-						PRCMU_QOS_DDR_OPP_MAX);
-					prcmu_qos_update_requirement(
-						PRCMU_QOS_ARM_KHZ,
-						(char *)data->client->name,
-						800000);
-				}
+				if (touchboost_active) {
+					if (!data->finger_cnt) {
+						prcmu_qos_update_requirement(
+							PRCMU_QOS_APE_OPP,
+							(char *)data->client->name,
+							PRCMU_QOS_APE_OPP_MAX);
+						prcmu_qos_update_requirement(
+							PRCMU_QOS_DDR_OPP,
+							(char *)data->client->name,
+							PRCMU_QOS_DDR_OPP_MAX);
+						if (touchboost_freq > 1250000)
+							touchboost_freq = 1250000;
+						prcmu_qos_update_requirement(
+							PRCMU_QOS_ARM_KHZ,
+							(char *)data->client->name,
+							touchboost_freq);
+					}
 
-				data->finger_cnt++;
+					data->finger_cnt++;
+				}
 #endif
 
 #ifdef TOUCH_S2W
