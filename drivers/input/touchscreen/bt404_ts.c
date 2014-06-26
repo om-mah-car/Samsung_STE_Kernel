@@ -452,7 +452,7 @@ static bool doubletap2wake = false;
 #endif /* TOUCH_DT2W */
 
 #ifdef TOUCH_BOOSTER
-static bool touchboost_active = true;
+static bool touchboost_active = false;
 module_param(touchboost_active, bool, 0644);
 static unsigned int touchboost_freq = 400000;
 module_param(touchboost_freq, uint, 0644);
