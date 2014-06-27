@@ -656,7 +656,7 @@ static int ws2401_dpi_ldi_init(struct ws2401_dpi *lcd)
 
 	ret |= ws2401_write_dcs_sequence(lcd, DCS_CMD_SEQ_WS2401_INIT);
 
-		ret |= ws2401_write_dcs_sequence(lcd, DCS_CMD_SEQ_WS2401_GAMMA_SET);
+//	ret |= ws2401_write_dcs_sequence(lcd, DCS_CMD_SEQ_WS2401_GAMMA_SET);
 /*
 	if (lcd->pd->bl_ctrl)
 		ret |= ws2401_write_dcs_sequence(lcd,
