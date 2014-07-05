@@ -440,7 +440,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	int cpu_load;
 	struct cpufreq_interactive_cpuinfo *pcpu =
 		&per_cpu(cpuinfo, data);
-	unsigned int new_freq;
+	unsigned int new_freq, min_f, max_f;
 	unsigned int loadadjfreq;
 	unsigned int index;
 	unsigned long flags;
@@ -472,18 +472,20 @@ static void cpufreq_interactive_timer(unsigned long data)
 	pcpu->prev_load = cpu_load;
 	boosted = boost_val || now < boostpulse_endtime;
 	boosted_freq = max(hispeed_freq, pcpu->policy->min);
+	min_f = pcpu->policy->cpuinfo.min_freq;
+	max_f = pcpu->policy->cpuinfo.max_freq;
 
 	if (cpu_load >= go_hispeed_load || boosted || pcpu->limits_changed) {
 		if (pcpu->target_freq < boosted_freq) {
 			new_freq = boosted_freq;
 		} else {
-			new_freq = choose_freq(pcpu, loadadjfreq);
+			new_freq = min_f + cpu_load * (max_f - min_f) / 100;
 
 			if (new_freq < boosted_freq)
 				new_freq = boosted_freq;
 		}
 	} else {
-		new_freq = choose_freq(pcpu, loadadjfreq);
+		new_freq = min_f + cpu_load * (max_f - min_f) / 100;
 		if (new_freq > boosted_freq &&
 				pcpu->target_freq < boosted_freq)
 			new_freq = boosted_freq;
@@ -528,7 +530,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	pcpu->hispeed_validate_time = now;
 
 	if (cpufreq_frequency_table_target(pcpu->policy, pcpu->freq_table,
-					   new_freq, CPUFREQ_RELATION_L,
+					   new_freq, CPUFREQ_RELATION_C,
 					   &index)) {
 		spin_unlock_irqrestore(&pcpu->target_freq_lock, flags);
 		goto rearm;
