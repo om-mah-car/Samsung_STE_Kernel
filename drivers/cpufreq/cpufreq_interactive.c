@@ -77,7 +77,7 @@ static unsigned int hispeed_freq = 500000;
 static unsigned long go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
 
 /* Sampling down factor to be applied to min_sample_time at max freq */
-static unsigned int sampling_down_factor = 60000;
+static unsigned int sampling_down_factor = 100000;
 
 /* Target load.  Lower values result in higher CPU speeds. */
 #define DEFAULT_TARGET_LOAD 90
@@ -143,7 +143,7 @@ static bool io_is_busy = true;
  * up_threshold_any_cpu_freq then do not let the frequency to drop below
  * sync_freq
  */
-static unsigned int up_threshold_any_cpu_load = 65;
+static unsigned int up_threshold_any_cpu_load = 50;
 static unsigned int sync_freq = 400000;
 static unsigned int up_threshold_any_cpu_freq = 500000;
 
