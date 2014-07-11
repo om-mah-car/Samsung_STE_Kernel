@@ -475,7 +475,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	min_f = pcpu->policy->cpuinfo.min_freq;
 	max_f = pcpu->policy->cpuinfo.max_freq;
 
-	if (cpu_load >= go_hispeed_load || boosted || pcpu->limits_changed) {
+	if (cpu_load >= go_hispeed_load || boosted) {
 		if (pcpu->target_freq < boosted_freq) {
 			new_freq = boosted_freq;
 		} else {
