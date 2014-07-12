@@ -326,10 +326,6 @@ static void skb_release_data(struct sk_buff *skb)
 	}
 	if (likely(atomic_read(&skb->users) == 1))
 		smp_rmb();
-	else if (likely(!atomic_dec_and_test(&skb->users))) {
-		printk(KERN_ERR "%s : &skb->users wasn't 1, so returned!\n", __func__);
-		return;
-	}
 
 	if (!skb->cloned ||
 	    !atomic_sub_return(skb->nohdr ? (1 << SKB_DATAREF_SHIFT) + 1 : 1,
