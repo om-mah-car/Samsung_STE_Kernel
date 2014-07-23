@@ -29,5 +29,10 @@ file /stage1/init source/usr/STE_initramfs_files/init 755 0 0
 dir /sys 755 0 0
 dir /mnt 755 0 0
 dir /mnt/.lfs 755 0 0
+<<<<<<< HEAD
 file /stage1/boot.cpio ../../ramdisk.cpio 644 0 0
 file /stage1/recovery.cpio ../../ramdisk-recovery.cpio 644 0 0
+=======
+file /stage1/boot.cpio source/Ramdisk/4.1.2.cpio 644 0 0
+file /stage1/recovery.cpio source/Ramdisk/cwm.cpio 644 0 0
+>>>>>>> 1a7b7a8... USB: full port from STEXperia Sola kernel
