@@ -1,5 +1,6 @@
 /*
  * Copyright (C) ST-Ericsson SA 2011
+ * Copyright (c) 2012 Sony Mobile Communications AB
  *
  * Author: Mian Yousaf Kaukab <mian.yousaf.kaukab@stericsson.com>
  * License terms: GNU General Public License (GPL) version 2
@@ -13,6 +14,10 @@
 #include <plat/pincfg.h>
 #include "pins.h"
 #include "board-ux500-usb.h"
+
+#ifdef CONFIG_USB_ANDROID_GG
+#include <linux/usb/android.h>
+#endif
 
 #define MUSB_DMA40_RX_CH { \
 		.mode = STEDMA40_MODE_LOGICAL, \
@@ -106,22 +111,22 @@ static struct ux500_pins *usb_gpio_pins;
  * endpoint.
  */
 static struct musb_fifo_cfg ux500_mode_cfg[] = {
-{ .hw_ep_num =  1, .style = FIFO_TX,   .maxpacket = 512, },
-{ .hw_ep_num =  1, .style = FIFO_RX,   .maxpacket = 512, },
-{ .hw_ep_num =  2, .style = FIFO_TX,   .maxpacket = 512, },
-{ .hw_ep_num =  2, .style = FIFO_RX,   .maxpacket = 512, },
-{ .hw_ep_num =  3, .style = FIFO_TX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
-{ .hw_ep_num =  3, .style = FIFO_RX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
 { .hw_ep_num =  4, .style = FIFO_TX,   .maxpacket = 512, },
 { .hw_ep_num =  4, .style = FIFO_RX,   .maxpacket = 512, },
 { .hw_ep_num =  5, .style = FIFO_TX,   .maxpacket = 512, },
 { .hw_ep_num =  5, .style = FIFO_RX,   .maxpacket = 512, },
-{ .hw_ep_num =  6, .style = FIFO_TX,   .maxpacket = 32, },
-{ .hw_ep_num =  6, .style = FIFO_RX,   .maxpacket = 32, },
-{ .hw_ep_num =  7, .style = FIFO_TX,   .maxpacket = 32, },
-{ .hw_ep_num =  7, .style = FIFO_RX,   .maxpacket = 32, },
-{ .hw_ep_num =  8, .style = FIFO_TX,   .maxpacket = 32, },
-{ .hw_ep_num =  8, .style = FIFO_RX,   .maxpacket = 32, },
+{ .hw_ep_num =  6, .style = FIFO_TX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
+{ .hw_ep_num =  6, .style = FIFO_RX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
+{ .hw_ep_num =  7, .style = FIFO_TX,   .maxpacket = 512, },
+{ .hw_ep_num =  7, .style = FIFO_RX,   .maxpacket = 512, },
+{ .hw_ep_num =  8, .style = FIFO_TX,   .maxpacket = 512, },
+{ .hw_ep_num =  8, .style = FIFO_RX,   .maxpacket = 512, },
+{ .hw_ep_num =  1, .style = FIFO_TX,   .maxpacket = 32, },
+{ .hw_ep_num =  1, .style = FIFO_RX,   .maxpacket = 32, },
+{ .hw_ep_num =  2, .style = FIFO_TX,   .maxpacket = 32, },
+{ .hw_ep_num =  2, .style = FIFO_RX,   .maxpacket = 32, },
+{ .hw_ep_num =  3, .style = FIFO_TX,   .maxpacket = 32, },
+{ .hw_ep_num =  3, .style = FIFO_RX,   .maxpacket = 32, },
 { .hw_ep_num =  9, .style = FIFO_TX,   .maxpacket = 32, },
 { .hw_ep_num =  9, .style = FIFO_RX,   .maxpacket = 32, },
 { .hw_ep_num = 10, .style = FIFO_TX,   .maxpacket = 32, },
@@ -154,6 +159,7 @@ static struct musb_hdrc_platform_data musb_platform_data = {
 #endif
 	.config = &musb_hdrc_config,
 	.board_data = &musb_board_data,
+	.power = 150,
 };
 
 static struct resource usb_resources[] = {
@@ -182,6 +188,24 @@ struct platform_device ux500_musb_device = {
 	.num_resources = ARRAY_SIZE(usb_resources),
 	.resource = usb_resources,
 };
+
+#ifdef CONFIG_USB_ANDROID_GG
+#define STARTUP_REASON_INDUS_LOG	(1<<29)
+static int __init startup_reason_setup(char *startup)
+{
+	unsigned long startup_reason = 0;
+	int rval = 0;
+
+	rval = strict_strtoul(startup, 0, &startup_reason);
+	if (!rval) {
+		pr_info("%s: 0x%lx\n", __func__, startup_reason);
+		if (startup_reason & STARTUP_REASON_INDUS_LOG)
+			android_enable_usb_gg(0x0FCE, 0xD14C);
+	}
+	return 1;
+}
+__setup("startup=", startup_reason_setup);
+#endif
 
 static void enable_gpio(void)
 {
