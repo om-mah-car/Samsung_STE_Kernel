@@ -29,7 +29,6 @@
 
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/export.h>
 
 static unsigned sev_pos(const struct v4l2_subscribed_event *sev, unsigned idx)
 {
