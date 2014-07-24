@@ -86,12 +86,12 @@ static struct mali_dvfs_data mali_dvfs[] = {
 	{600000, 0x0104017D, 184, 0x32},
 	{619200, 0x01040181, 196, 0x33},
 	{640000, 0x01030164, 208, 0x34},
-	{660480, 0x010501AC, 220, 0x3F},
-	{679680, 0x010501B1, 232, 0x3F},
-	{700800, 0x01040192, 244, 0x3F},
-	{710400, 0x01010125, 250, 0x3F},
-	{720000, 0x01040196, 256, 0x3F},
-	{729600, 0x01010126, 262, 0x3F},
+	{660480, 0x010501AC, 220, 0x39},
+	{679680, 0x010501B1, 232, 0x39},
+	{700800, 0x01040192, 244, 0x39},
+	{710400, 0x01010125, 250, 0x39},
+	{720000, 0x01040196, 256, 0x39},
+	{729600, 0x01010126, 262, 0x39},
 };
 
 int mali_utilization_high_to_low = MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT;
@@ -112,10 +112,12 @@ static struct workqueue_struct *mali_utilization_workqueue;
 static struct wake_lock wakelock;
 #endif
 
+static int last_idx 	= 0;
+
 static u32 boost_enable 	= 1;
 static u32 boost_working 	= 0;
 static u32 boost_required 	= 0;
-static u32 boost_delay 		= 500;
+static u32 boost_delay 		= 250;
 static u32 boost_low 		= 0;
 static u32 boost_high 		= 0;
 static u32 boost_utilization 	= 0;
@@ -196,16 +198,22 @@ static void mali_boost_update(void)
 				}
 				
 				break;
-			}
+			} 
 		}
 	}
 	
-	if (idx >= boost_high) idx = boost_high;
+	if ((idx >= boost_high) || (idx == -1)) idx = boost_high;
 	else if (idx <= boost_low) idx = boost_low;
 	
 	vape = mali_dvfs[idx].vape_raw;
 	pll = mali_dvfs[idx].clkpll;
-	pr_err("[Mali] @%u kHz \n", mali_dvfs[idx].freq);
+	
+	if (last_idx!=idx)
+	{
+		pr_err("[Mali] @%u kHz \n", mali_dvfs[idx].freq);
+		last_idx = idx;
+	}
+	
 	prcmu_abb_write(AB8500_REGU_CTRL2, 
 		AB8500_VAPE_SEL1, 
 		&vape, 
