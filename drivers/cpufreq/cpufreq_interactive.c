@@ -73,7 +73,7 @@ static struct mutex gov_lock;
 static struct work_struct suspend, resume;
 
 /* Hi speed to bump to from lo speed when load burst (default max) */
-static unsigned int hispeed_freq = 500000;
+static unsigned int hispeed_freq = 600000;
 
 /* Go to hi speed when CPU load at or above this value. */
 #define DEFAULT_GO_HISPEED_LOAD 90
@@ -140,7 +140,7 @@ static bool io_is_busy = true;
  * sync_freq
  */
 static unsigned int up_threshold_any_cpu_load = 75;
-static unsigned int sync_freq = 500000;
+static unsigned int sync_freq = 400000;
 static unsigned int up_threshold_any_cpu_freq = 800000;
 
 static inline cputime64_t get_cpu_idle_time_jiffy(unsigned int cpu,
