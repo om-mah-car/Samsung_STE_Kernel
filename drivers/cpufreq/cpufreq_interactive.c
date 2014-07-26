@@ -1245,7 +1245,7 @@ static void cpufreq_interactive_late_resume(struct early_suspend *handler)
 	schedule_work(&resume);
 }
 
-static struct early_suspend cpufreq_interactive_early_suspend = {
+static struct early_suspend early_suspend = {
 	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB,
 	.suspend = cpufreq_interactive_early_suspend,
 	.resume = cpufreq_interactive_late_resume,
@@ -1442,7 +1442,7 @@ static int __init cpufreq_interactive_init(void)
 	if (IS_ERR(speedchange_task))
 		return PTR_ERR(speedchange_task);
 
-	register_early_suspend(&cpufreq_interactive_early_suspend);
+	register_early_suspend(&early_suspend);
 	INIT_WORK(&resume, cpufreq_interactive_resume);
 	INIT_WORK(&suspend, cpufreq_interactive_suspend);
 
