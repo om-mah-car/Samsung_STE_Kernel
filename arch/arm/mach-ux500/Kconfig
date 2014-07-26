@@ -154,8 +154,6 @@ config MACH_SEC_HENDRIX
 	bool "Hendrix"
 	help
 	  Supports Hendrix boards
-config U8500_HOTPLUG
-	bool "Samsung U8500 hotplug option"
 endchoice
 menu "Samsung Product Features"
 config SAMSUNG_PRODUCT_SHIP
@@ -349,6 +347,10 @@ config MACH_CODINA_EURO
 	default n
 	help
 	  Supports Codina Euro boards.
+
+config U8500_HOTPLUG
+	depends on MACH_SAMSUNG_U8500
+	bool "Samsung U8500 hotplug option"
 source "arch/arm/mach-ux500/Kconfig-arch"
 source "arch/arm/mach-ux500/pm/Kconfig"
 source "arch/arm/mach-ux500/test/Kconfig"
