@@ -643,6 +643,16 @@ static inline bool over_bground_thresh(void)
 }
 
 /*
+ * Called under wb->list_lock. If there are multiple wb per bdi,
+ * only the flusher working on the first wb should do it.
+ */
+static void wb_update_bandwidth(struct bdi_writeback *wb,
+				unsigned long start_time)
+{
+	__bdi_update_bandwidth(wb->bdi, start_time);
+}
+
+/*
  * Explicit flushing or periodic writeback of "old" data.
  *
  * Define "old": the first time one of an inode's pages is dirtied, we mark the
@@ -669,6 +679,7 @@ static long wb_writeback(struct bdi_writeback *wb,
 		.for_sync		= work->for_sync,
 		.range_cyclic		= work->range_cyclic,
 	};
+	unsigned long wb_start = jiffies;
 	unsigned long oldest_jif;
 	long wrote = 0;
 	long write_chunk = MAX_WRITEBACK_PAGES;
@@ -707,6 +718,8 @@ static long wb_writeback(struct bdi_writeback *wb,
 		 */
 		if (work->nr_pages <= 0)
 			break;
+
+		wb_update_bandwidth(wb, wb_start);
 
 		/*
 		 * Background writeout and kupdate-style writeback may
