@@ -63,35 +63,34 @@ struct mali_dvfs_data
 {
 	u32 	freq;
 	u32 	clkpll;
-	u32	threshold;
 	u8 	vape_raw;
 };
 
 static struct mali_dvfs_data mali_dvfs[] = {
-	{192000, 0x0101010A,  20, 0x26},
-	{256000, 0x01030128,  30, 0x26},
-	{299520, 0x0105014E,  36, 0x26},
-	{320000, 0x01030132,  44, 0x26},
-	{360000, 0x0105015E,  52, 0x26},
-	{399360, 0x01050168,  64, 0x26},
-	{422400, 0x01010116,  76, 0x26},
-	{441600, 0x0102012E,  88, 0x26},
-	{460800, 0x01010118, 100, 0x29},
-	{480000, 0x01020132, 112, 0x2A},
-	{499200, 0x0101011A, 124, 0x2B},
-	{518400, 0x01020136, 136, 0x2C},
-	{537600, 0x0101011C, 148, 0x2D},
-	{560640, 0x01050192, 160, 0x2F},
-	{579840, 0x01050197, 172, 0x30},
-	{600000, 0x0104017D, 184, 0x32},
-	{619200, 0x01040181, 196, 0x33},
-	{640000, 0x01030164, 208, 0x34},
-	{660480, 0x010501AC, 220, 0x3F},
-	{679680, 0x010501B1, 232, 0x3F},
-	{700800, 0x01040192, 244, 0x3F},
-	{710400, 0x01010125, 250, 0x3F},
-	{720000, 0x01040196, 256, 0x3F},
-	{729600, 0x01010126, 262, 0x3F},
+	{192000, 0x0101010A, 0x26},
+	{256000, 0x01030128, 0x26},
+	{299520, 0x0105014E, 0x26},
+	{320000, 0x01030132, 0x26},
+	{360000, 0x0105015E, 0x26},
+	{399360, 0x01050168, 0x26},
+	{422400, 0x01010116, 0x26},
+	{441600, 0x0102012E, 0x26},
+	{460800, 0x01010118, 0x29},
+	{480000, 0x01020132, 0x2A},
+	{499200, 0x0101011A, 0x2B},
+	{518400, 0x01020136, 0x2C},
+	{537600, 0x0101011C, 0x2D},
+	{560640, 0x01050192, 0x2F},
+	{579840, 0x01050197, 0x30},
+	{600000, 0x0104017D, 0x32},
+	{619200, 0x01040181, 0x33},
+	{640000, 0x01030164, 0x34},
+	{660480, 0x010501AC, 0x3F},
+	{679680, 0x010501B1, 0x3F},
+	{700800, 0x01040192, 0x3F},
+	{710400, 0x01010125, 0x3F},
+	{720000, 0x01040196, 0x3F},
+	{729600, 0x01010126, 0x3F},
 };
 
 int mali_utilization_high_to_low = MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT;
@@ -168,49 +167,38 @@ static void mali_boost_update(void)
 {
 	u8 vape;
 	u32 pll;
-	
-	u32 idx = -1;
-	int mali_dvfs_size = ARRAY_SIZE(mali_dvfs);
-	
-	if (boost_utilization >= mali_dvfs[mali_dvfs_size-1].threshold) {
-		idx = mali_dvfs_size-1;
-	}  else
-	if (boost_utilization <= mali_dvfs[0].threshold) {
-		idx = 0;
-	}
-	
-	if (idx == -1)
-	{
-		int i;
-		for (i=0; i<mali_dvfs_size-2; i++)
-		{
-			if ((mali_dvfs[i].threshold <= boost_utilization) &&
-			    (boost_utilization <= mali_dvfs[i+1].threshold )) 
-			{
-				if (mali_dvfs[i].threshold == boost_utilization) 
-				{
-					idx = i;
-				}else
-				{
-					idx = i+1;
-				}
-				
-				break;
-			}
+
+	if (!boost_required) {
+		if (boost_utilization >= boost_upthreshold) {
+			vape = mali_dvfs[boost_high].vape_raw;
+			pll = mali_dvfs[boost_high].clkpll;
+
+			pr_err("[Mali] @%u kHz - Boost\n", mali_dvfs[boost_high].freq);
+
+			prcmu_abb_write(AB8500_REGU_CTRL2, 
+				AB8500_VAPE_SEL1, 
+				&vape, 
+				1);
+			prcmu_write(PRCMU_PLLSOC0, pll);
+
+			boost_required = 1;
+		}
+	} else {
+		if (boost_utilization <= boost_downthreshold) {
+			vape = mali_dvfs[boost_low].vape_raw;
+			pll = mali_dvfs[boost_low].clkpll;
+
+			pr_err("[Mali] @%u kHz - Deboost\n", mali_dvfs[boost_low].freq);
+
+			prcmu_write(PRCMU_PLLSOC0, pll);
+			prcmu_abb_write(AB8500_REGU_CTRL2, 
+				AB8500_VAPE_SEL1, 
+				&vape, 
+				1);
+
+			boost_required = 0;
 		}
 	}
-	
-	if (idx >= boost_high) idx = boost_high;
-	else if (idx <= boost_low) idx = boost_low;
-	
-	vape = mali_dvfs[idx].vape_raw;
-	pll = mali_dvfs[idx].clkpll;
-	pr_err("[Mali] @%u kHz \n", mali_dvfs[idx].freq);
-	prcmu_abb_write(AB8500_REGU_CTRL2, 
-		AB8500_VAPE_SEL1, 
-		&vape, 
-		1);
-	prcmu_write(PRCMU_PLLSOC0, pll);
 }
 
 static void mali_clock_apply(u32 idx)
