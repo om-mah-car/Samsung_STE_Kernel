@@ -71,7 +71,7 @@ struct page {
 					 * Kernel may make use of this field even when slub
 					 * uses the rest of the double word!
  					 */
-					atomic_t _count;
+//					atomic_t _count;
 				};
 			};
 		};
