@@ -587,7 +587,7 @@ void writeback_inodes_wb(struct bdi_writeback *wb,
 	if (!wbc->wb_start)
 		wbc->wb_start = jiffies; /* livelock avoidance */
 	spin_lock(&wb->list_lock);
-	if (!wbc->for_kupdate || list_empty(&wb->b_io))
+	if (list_empty(&wb->b_io))
 		queue_io(wb, wbc->older_than_this);
 
 	while (!list_empty(&wb->b_io)) {
@@ -614,7 +614,7 @@ static void __writeback_inodes_sb(struct super_block *sb,
 	WARN_ON(!rwsem_is_locked(&sb->s_umount));
 
 	spin_lock(&wb->list_lock);
-	if (!wbc->for_kupdate || list_empty(&wb->b_io))
+	if (list_empty(&wb->b_io))
 		queue_io(wb, wbc->older_than_this);
 	writeback_sb_inodes(sb, wb, wbc, true);
 	spin_unlock(&wb->list_lock);
