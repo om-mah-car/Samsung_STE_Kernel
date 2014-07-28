@@ -154,6 +154,8 @@ config MACH_SEC_HENDRIX
 	bool "Hendrix"
 	help
 	  Supports Hendrix boards
+config U8500_HOTPLUG
+	bool "Samsung U8500 hotplug option"
 endchoice
 menu "Samsung Product Features"
 config SAMSUNG_PRODUCT_SHIP
