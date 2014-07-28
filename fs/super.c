@@ -16,7 +16,7 @@
  *  Added change_root: Werner Almesberger & Hans Lermen, Feb '96
  *  Added options to /proc/mounts:
  *    Torbjörn Lindh (torbjorn.lindh@gopta.se), April 14, 1996.
- *  Added devfs support: Richard Gooch <rgooch@atnf.csiro.au>, 13-JAN-1998
+ *  Added devfs support: Richard Gooch <rgooch@atnf.csiro.au>, 1-JAN-1998
  *  Heavily rewritten for 'one fs - one tree' dcache architecture. AV, Mar 2000
  */
 
@@ -311,6 +311,39 @@ static int grab_super(struct super_block *s) __releases(sb_lock)
 	up_write(&s->s_umount);
 	put_super(s);
 	return 0;
+}
+
+/*
+*      grab_super_passive - acquire a passive reference
+*      @s: reference we are trying to grab
+*
+*      Tries to acquire a passive reference. This is used in places where we
+*      cannot take an active reference but we need to ensure that the
+*      superblock does not go away while we are working on it. It returns
+*      false if a reference was not gained, and returns true with the s_umount
+*      lock held in read mode if a reference is gained. On successful return,
+*      the caller must drop the s_umount lock and the passive reference when
+*      done.
+*/
+bool grab_super_passive(struct super_block *sb)
+{
+        spin_lock(&sb_lock);
+        if (list_empty(&sb->s_instances)) {
+                spin_unlock(&sb_lock);
+                return false;
+        }
+
+        sb->s_count++;
+        spin_unlock(&sb_lock);
+ 
+        if (down_read_trylock(&sb->s_umount)) {
+                if (sb->s_root)
+                        return true;
+                up_read(&sb->s_umount);
+        }
+
+        put_super(sb);
+        return false;
 }
 
 /*
