@@ -38,6 +38,8 @@
 #include "psb_intel_drv.h"
 #include "psb_fb.h"
 
+#include "mdfld_output.h"
+
 static void psb_user_framebuffer_destroy(struct drm_framebuffer *fb);
 static int psb_user_framebuffer_create_handle(struct drm_framebuffer *fb,
 					      struct drm_file *file_priv,
@@ -281,6 +283,8 @@ static int psbfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg
 	case 0x12345678:
 		if (!capable(CAP_SYS_RAWIO))
 			return -EPERM;
+	        if (IS_MFLD(dev))
+                        return -EOPNOTSUPP;
 		if (get_user(l, p))
 			return -EFAULT;
 		if (l > 32)
@@ -334,6 +338,19 @@ err:
 	kfree(fb);
 	return NULL;
 }
+
+static struct fb_ops psbfb_mfld_ops = {
+	.owner = THIS_MODULE,
+	.fb_check_var = drm_fb_helper_check_var,
+	.fb_set_par = drm_fb_helper_set_par,
+	.fb_blank = drm_fb_helper_blank,
+	.fb_setcolreg = psbfb_setcolreg,
+	.fb_fillrect = cfb_fillrect,
+	.fb_copyarea = cfb_copyarea,
+	.fb_imageblit = cfb_imageblit,
+	.fb_mmap = psbfb_mmap,
+	.fb_ioctl = psbfb_ioctl,
+};
 
 /**
  *	psbfb_alloc		-	allocate frame buffer memory
