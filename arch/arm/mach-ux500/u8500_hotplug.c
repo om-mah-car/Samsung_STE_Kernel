@@ -21,11 +21,11 @@
 #include <linux/init.h>
 #include <linux/cpufreq.h>
 
-static struct work_struct suspend_work;
-static struct work_struct resume_work;
+static struct work_struct offline_cpu_work;
+static struct work_struct online_cpu_work;
 
 static bool suspend = false;
-static unsigned int suspend_max_freq = 800000;
+static bool suspend_max_freq = 800000;
 module_param(suspend_max_freq, uint, 0644);
 
 static int cpufreq_callback(struct notifier_block *nfb,
