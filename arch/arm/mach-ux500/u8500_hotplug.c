@@ -19,76 +19,28 @@
 #include <linux/workqueue.h>
 #include <linux/cpu.h>
 #include <linux/init.h>
-#include <linux/cpufreq.h>
 
 static struct work_struct offline_cpu_work;
 static struct work_struct online_cpu_work;
 
-static bool suspend = false;
-static bool suspend_max_freq = 800000;
-module_param(suspend_max_freq, uint, 0644);
-
-static int cpufreq_callback(struct notifier_block *nfb,
-		unsigned long event, void *data)
+static void offline_cpu_work_fn(struct work_struct *work)
 {
-	struct cpufreq_policy *policy = data;
-
-	if (event != CPUFREQ_ADJUST)
-		return 0;
-
-	cpufreq_verify_within_limits(policy,
-		policy->cpuinfo.min_freq,
-		suspend ? suspend_max_freq : policy->cpuinfo.max_freq);
-
-	return 0;
+	cpu_down(1);
 }
 
-static struct notifier_block cpufreq_notifier_block = {
-	.notifier_call = cpufreq_callback,
-};
-
-static void suspend_work_fn(struct work_struct *work)
+static void online_cpu_work_fn(struct work_struct *work)
 {
-	int cpu;
-
-	suspend = true;
-
-	for_each_online_cpu(cpu)
-	{
-		cpufreq_update_policy(cpu);
-
-		if (!cpu)
-			continue;
-
-		cpu_down(cpu);
-	}
-}
-
-static void resume_work_fn(struct work_struct *work)
-{
-	int cpu;
-
-	suspend = false;
-
-	for_each_online_cpu(cpu)
-	{
-		cpufreq_update_policy(cpu);
-
-		if (!cpu)
-			continue;
-
-		cpu_up(cpu);
-	}
+	cpu_up(1);
 }
 
 static void u8500_hotplug_suspend(struct early_suspend *handler)
 {
-	schedule_work(&suspend_work);
+	schedule_work(&offline_cpu_work);
 }
 
 static void u8500_hotplug_resume(struct early_suspend *handler)
 {
-	schedule_work(&resume_work);
+	schedule_work(&online_cpu_work);
 }
 
 static struct early_suspend u8500_hotplug_early_suspend = {
@@ -99,12 +51,10 @@ static struct early_suspend u8500_hotplug_early_suspend = {
 
 static int u8500_hotplug_init(void)
 {
-	INIT_WORK(&suspend_work, suspend_work_fn);
-	INIT_WORK(&resume_work, resume_work_fn);
+	INIT_WORK(&offline_cpu_work, offline_cpu_work_fn);
+	INIT_WORK(&online_cpu_work, online_cpu_work_fn);
 
 	register_early_suspend(&u8500_hotplug_early_suspend);
-
-	cpufreq_register_notifier(&cpufreq_notifier_block, CPUFREQ_POLICY_NOTIFIER);
 }
 
 late_initcall(u8500_hotplug_init);
