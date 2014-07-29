@@ -49,12 +49,19 @@ static struct notifier_block cpufreq_notifier_block = {
 
 static void suspend_work_fn(struct work_struct *work)
 {
+	int cpu;
 
 	suspend = true;
 
-	cpu_down(1);
+	for_each_online_cpu(cpu)
+	{
+		cpufreq_update_policy(cpu);
 
-	cpufreq_update_policy(0);
+		if (!cpu)
+			continue;
+
+		cpu_down(cpu);
+	}
 }
 
 static void resume_work_fn(struct work_struct *work)
@@ -63,10 +70,15 @@ static void resume_work_fn(struct work_struct *work)
 
 	suspend = false;
 
-	cpu_up(1);
+	for_each_online_cpu(cpu)
+	{
+		cpufreq_update_policy(cpu);
 
-	cpufreq_update_policy(0);
-	cpufreq_update_policy(1);
+		if (!cpu)
+			continue;
+
+		cpu_up(cpu);
+	}
 }
 
 static void u8500_hotplug_suspend(struct early_suspend *handler)
