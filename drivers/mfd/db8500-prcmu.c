@@ -1444,9 +1444,9 @@ static struct attribute *liveopp_attrs[] = {
 	&arm_step06_interface.attr, 
 	&arm_step07_interface.attr, 
 	&arm_step08_interface.attr, 
-	&arm_step09_interface.attr, 
-#ifdef CONFIG_LIVEOPP_EXTENDED_FREQ
+	&arm_step09_interface.attr,
 	&arm_step10_interface.attr, 
+#ifdef CONFIG_LIVEOPP_EXTENDED_FREQ
 	&arm_step11_interface.attr, 
 	&arm_step12_interface.attr, 
 	&arm_step13_interface.attr, 
