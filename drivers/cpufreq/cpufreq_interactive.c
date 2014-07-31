@@ -139,9 +139,9 @@ static bool io_is_busy = true;
  * up_threshold_any_cpu_freq then do not let the frequency to drop below
  * sync_freq
  */
-static unsigned int up_threshold_any_cpu_load = 75;
+static unsigned int up_threshold_any_cpu_load = 50;
 static unsigned int sync_freq = 400000;
-static unsigned int up_threshold_any_cpu_freq = 800000;
+static unsigned int up_threshold_any_cpu_freq = 600000;
 
 static inline cputime64_t get_cpu_idle_time_jiffy(unsigned int cpu,
 						  cputime64_t *wall)
