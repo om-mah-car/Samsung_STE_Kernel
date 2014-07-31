@@ -1690,14 +1690,16 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,
 			CPUFREQ_NOTIFY, policy);
 
-	data->min = policy->min;
-	data->max = policy->max;
-
-	if(prev_min != data->min || prev_max != data->max)
-		pr_info("new min and max freqs are %u - %u kHz\n",
-					data->min, data->max);
-	pr_debug("new min and max freqs are %u - %u kHz\n",
-					data->min, data->max);
+	if (policy->min != 1000000) {
+		data->min = policy->min;
+		data->max = policy->max;
+		
+		if(prev_min != data->min || prev_max != data->max)
+			pr_info("new min and max freqs are %u - %u kHz\n",
+						data->min, data->max);
+		pr_debug("new min and max freqs are %u - %u kHz\n",
+						data->min, data->max);
+	}
 
 	if (cpufreq_driver->setpolicy) {
 		data->policy = policy->policy;
