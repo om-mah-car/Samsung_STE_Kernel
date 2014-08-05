@@ -4,7 +4,6 @@
  * Copyright 2005 Mentor Graphics Corporation
  * Copyright (C) 2005-2006 by Texas Instruments
  * Copyright (C) 2006-2007 Nokia Corporation
- * Copyright (C) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -100,12 +99,6 @@
 #include <linux/prefetch.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
-
-#ifdef CONFIG_USB_HOST_EXTRA_NOTIFICATION
-#include <linux/usb/host_ext_event.h>
-static void vbus_drop_host_send_uevent(struct work_struct *);
-static DECLARE_WORK(vbus_drop_uevent_work, vbus_drop_host_send_uevent);
-#endif
 
 #include "musb_core.h"
 
@@ -410,13 +403,6 @@ void musb_hnp_stop(struct musb *musb)
 
 #endif
 
-#ifdef CONFIG_USB_HOST_EXTRA_NOTIFICATION
-static void vbus_drop_host_send_uevent(struct work_struct *ignored)
-{
-	host_send_uevent(USB_HOST_EXT_EVENT_VBUS_DROP);
-}
-#endif
-
 /*
  * Interrupt Service Routine to record USB "global" interrupts.
  * Since these do not happen often and signify things of
@@ -618,24 +604,8 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 				musb->port1_status);
 
 		/* go through A_WAIT_VFALL then start a new session */
-		if (!ignore) {
+		if (!ignore)
 			musb_platform_set_vbus(musb, 0);
-#ifdef CONFIG_USB_HOST_EXTRA_NOTIFICATION
-			switch (musb->xceiv->state) {
-			case OTG_STATE_A_IDLE:
-			case OTG_STATE_A_WAIT_VRISE:
-			case OTG_STATE_A_WAIT_BCON:
-			case OTG_STATE_A_HOST:
-			case OTG_STATE_A_SUSPEND:
-			case OTG_STATE_A_PERIPHERAL:
-				schedule_work(&vbus_drop_uevent_work);
-				break;
-			default:
-				break;
-			}
-#endif
-
-		}
 		handled = IRQ_HANDLED;
 	}
 
@@ -867,12 +837,10 @@ b_host:
 #endif
 			break;
 		case OTG_STATE_A_PERIPHERAL:
-		case OTG_STATE_A_IDLE:
 			musb_hnp_stop(musb);
 			musb_root_disconnect(musb);
 			/* FALLTHROUGH */
 		case OTG_STATE_B_WAIT_ACON:
-		case OTG_STATE_A_WAIT_VRISE:
 			/* FALLTHROUGH */
 #ifdef CONFIG_USB_OTG_20
 			/* OTG 2.0 Compliance */
@@ -1887,7 +1855,7 @@ musb_srp_store(struct device *dev, struct device_attribute *attr,
 	struct musb	*musb = dev_to_musb(dev);
 	unsigned short	srp;
 #ifdef CONFIG_USB_OTG_20
-	musb->xceiv->start_srp(musb->xceiv, 0);
+	musb->xceiv->start_srp(musb->xceiv);
 #endif
 	if (sscanf(buf, "%hu", &srp) != 1
 			|| (srp != 1)) {
@@ -2186,6 +2154,8 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 	}
 	if (status < 0)
 		goto fail3;
+
+	pm_runtime_put(musb->controller);
 
 	status = musb_init_debugfs(musb);
 	if (status < 0)
