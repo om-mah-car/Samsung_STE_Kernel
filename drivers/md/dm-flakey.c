@@ -28,10 +28,15 @@ struct flakey_c {
 	sector_t start;
 	unsigned up_interval;
 	unsigned down_interval;
+	unsigned long flags;
 	unsigned corrupt_bio_byte;
 	unsigned corrupt_bio_rw;
 	unsigned corrupt_bio_value;
 	unsigned corrupt_bio_flags;
+};
+
+enum feature_flag_bits {
+	DROP_WRITES
 };
 
 static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
@@ -143,53 +148,69 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
  */
 static int flakey_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
-	struct flakey_c *fc;
-	unsigned long long tmp;
+	static struct dm_arg _args[] = {
+		{0, UINT_MAX, "Invalid up interval"},
+		{0, UINT_MAX, "Invalid down interval"},
+	};
 
-	if (argc != 4) {
-		ti->error = "dm-flakey: Invalid argument count";
+	int r;
+	struct flakey_c *fc;
+	unsigned long long tmpll;
+	struct dm_arg_set as;
+	const char *devname;
+
+	as.argc = argc;
+	as.argv = argv;
+
+	if (argc < 4) {
+		ti->error = "Invalid argument count";
 		return -EINVAL;
 	}
 
-	fc = kmalloc(sizeof(*fc), GFP_KERNEL);
+	fc = kzalloc(sizeof(*fc), GFP_KERNEL);
 	if (!fc) {
-		ti->error = "dm-flakey: Cannot allocate linear context";
+		ti->error = "Cannot allocate linear context";
 		return -ENOMEM;
 	}
 	fc->start_time = jiffies;
 
-	if (sscanf(argv[1], "%llu", &tmp) != 1) {
-		ti->error = "dm-flakey: Invalid device sector";
-		goto bad;
-	}
-	fc->start = tmp;
+	devname = dm_shift_arg(&as);
 
-	if (sscanf(argv[2], "%u", &fc->up_interval) != 1) {
-		ti->error = "dm-flakey: Invalid up interval";
+	if (sscanf(dm_shift_arg(&as), "%llu", &tmpll) != 1) {
+		ti->error = "Invalid device sector";
 		goto bad;
 	}
+	fc->start = tmpll;
 
-	if (sscanf(argv[3], "%u", &fc->down_interval) != 1) {
-		ti->error = "dm-flakey: Invalid down interval";
+	r = dm_read_arg(_args, &as, &fc->up_interval, &ti->error);
+	if (r)
 		goto bad;
-	}
+
+	r = dm_read_arg(_args, &as, &fc->down_interval, &ti->error);
+	if (r)
+		goto bad;
 
 	if (!(fc->up_interval + fc->down_interval)) {
-		ti->error = "dm-flakey: Total (up + down) interval is zero";
+		ti->error = "Total (up + down) interval is zero";
 		goto bad;
 	}
 
 	if (fc->up_interval + fc->down_interval < fc->up_interval) {
-		ti->error = "dm-flakey: Interval overflow";
+		ti->error = "Interval overflow";
 		goto bad;
 	}
 
-	if (dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &fc->dev)) {
-		ti->error = "dm-flakey: Device lookup failed";
+	r = parse_features(&as, fc, ti);
+	if (r)
+		goto bad;
+
+	if (dm_get_device(ti, devname, dm_table_get_mode(ti->table), &fc->dev)) {
+		ti->error = "Device lookup failed";
 		goto bad;
 	}
 
 	ti->num_flush_requests = 1;
+	ti->num_discard_requests = 1;
 	ti->private = fc;
 	return 0;
 
@@ -239,22 +260,6 @@ static void corrupt_bio_data(struct bio *bio, struct flakey_c *fc)
 			(bio_data_dir(bio) == WRITE) ? 'w' : 'r',
 			bio->bi_rw, (unsigned long long)bio->bi_sector, bio_bytes);
 	}
-}
-
-static sector_t flakey_map_sector(struct dm_target *ti, sector_t bi_sector)
-{
-	struct flakey_c *fc = ti->private;
-
-	return fc->start + (bi_sector - ti->begin);
-}
-
-static void flakey_map_bio(struct dm_target *ti, struct bio *bio)
-{
-	struct flakey_c *fc = ti->private;
-
-	bio->bi_bdev = fc->dev->bdev;
-	if (bio_sectors(bio))
-		bio->bi_sector = flakey_map_sector(ti, bio->bi_sector);
 }
 
 static int flakey_map(struct dm_target *ti, struct bio *bio,
@@ -361,17 +366,8 @@ static int flakey_status(struct dm_target *ti, status_type_t type,
 static int flakey_ioctl(struct dm_target *ti, unsigned int cmd, unsigned long arg)
 {
 	struct flakey_c *fc = ti->private;
-	struct dm_dev *dev = fc->dev;
-	int r = 0;
 
-	/*
-	 * Only pass ioctls through if the device sizes match exactly.
-	 */
-	if (fc->start ||
-	    ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT)
-		r = scsi_verify_blk_ioctl(NULL, cmd);
-
-	return r ? : __blkdev_driver_ioctl(dev->bdev, dev->mode, cmd, arg);
+	return __blkdev_driver_ioctl(fc->dev->bdev, fc->dev->mode, cmd, arg);
 }
 
 static int flakey_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
@@ -398,7 +394,7 @@ static int flakey_iterate_devices(struct dm_target *ti, iterate_devices_callout_
 
 static struct target_type flakey_target = {
 	.name   = "flakey",
-	.version = {1, 1, 0},
+	.version = {1, 2, 0},
 	.module = THIS_MODULE,
 	.ctr    = flakey_ctr,
 	.dtr    = flakey_dtr,
