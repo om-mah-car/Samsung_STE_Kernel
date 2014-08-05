@@ -710,6 +710,8 @@ static ssize_t cpufreq_max_limit_store(struct kobject *kobj,
 		/* Save the last max cpufreq */
 		cpufreq_max_last_val = new_policy.max;
 		cpufreq_max_limit_val = cpufreq_dvfs_powersave;
+		if (cpufreq_max_last_val < 1000000)
+			cpufreq_max_last_val = 1000000;
 		cpufreq_update_freq(0, new_policy.min, cpufreq_max_limit_val);
 	} else {
 		/* 
