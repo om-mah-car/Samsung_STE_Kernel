@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 
 #include "md.h"
+#include "raid1.h"
 #include "raid5.h"
 #include "dm.h"
 #include "bitmap.h"
@@ -72,6 +73,7 @@ static struct raid_type {
 	const unsigned level;		/* RAID level. */
 	const unsigned algorithm;	/* RAID algorithm. */
 } raid_types[] = {
+	{"raid1",    "RAID1 (mirroring)",               0, 2, 1, 0 /* NONE */},
 	{"raid4",    "RAID4 (dedicated parity disk)",	1, 2, 5, ALGORITHM_PARITY_0},
 	{"raid5_la", "RAID5 (left asymmetric)",		1, 2, 5, ALGORITHM_LEFT_ASYMMETRIC},
 	{"raid5_ra", "RAID5 (right asymmetric)",	1, 2, 5, ALGORITHM_RIGHT_ASYMMETRIC},
@@ -105,7 +107,8 @@ static struct raid_set *context_alloc(struct dm_target *ti, struct raid_type *ra
 	}
 
 	sectors_per_dev = ti->len;
-	if (sector_div(sectors_per_dev, (raid_devs - raid_type->parity_devs))) {
+	if ((raid_type->level > 1) &&
+	    sector_div(sectors_per_dev, (raid_devs - raid_type->parity_devs))) {
 		ti->error = "Target length not divisible by number of data devices";
 		return ERR_PTR(-EINVAL);
 	}
@@ -236,13 +239,16 @@ static int dev_parms(struct raid_set *rs, char **argv)
 
 /*
  * Possible arguments are...
- * RAID456:
  *	<chunk_size> [optional_args]
  *
- * Optional args:
- *    [[no]sync]			Force or prevent recovery of the entire array
+ * Argument definitions
+ *    <chunk_size>			The number of sectors per disk that
+ *                                      will form the "stripe"
+ *    [[no]sync]			Force or prevent recovery of the
+ *                                      entire array
  *    [rebuild <idx>]			Rebuild the drive indicated by the index
- *    [daemon_sleep <ms>]		Time between bitmap daemon work to clear bits
+ *    [daemon_sleep <ms>]		Time between bitmap daemon work to
+ *                                      clear bits
  *    [min_recovery_rate <kB/sec/disk>]	Throttle RAID initialization
  *    [max_recovery_rate <kB/sec/disk>]	Throttle RAID initialization
  *    [max_write_behind <sectors>]	See '-write-behind=' (man mdadm)
@@ -257,10 +263,20 @@ static int parse_raid_params(struct raid_set *rs, char **argv,
 
 	/*
 	 * First, parse the in-order required arguments
+	 * "chunk_size" is the only argument of this type.
 	 */
-	if ((strict_strtoul(argv[0], 10, &value) < 0) ||
-	    !is_power_of_2(value) || (value < 8)) {
+	if ((strict_strtoul(argv[0], 10, &value) < 0)) {
 		rs->ti->error = "Bad chunk size";
+		return -EINVAL;
+	} else if (rs->raid_type->level == 1) {
+		if (value)
+			DMERR("Ignoring chunk size parameter for RAID 1");
+		value = 0;
+	} else if (!is_power_of_2(value)) {
+		rs->ti->error = "Chunk size must be a power of 2";
+		return -EINVAL;
+	} else if (value < 8) {
+		rs->ti->error = "Chunk size value is too small";
 		return -EINVAL;
 	}
 
@@ -369,6 +385,11 @@ static int parse_raid_params(struct raid_set *rs, char **argv,
 		}
 	}
 
+	if (rs->md.chunk_sectors)
+		rs->ti->split_io = rs->md.chunk_sectors;
+	else
+		rs->ti->split_io = region_size;
+
 	/* Assume there are no metadata devices until the drives are parsed */
 	rs->md.persistent = 0;
 	rs->md.external = 1;
@@ -386,6 +407,9 @@ static void do_table_event(struct work_struct *ws)
 static int raid_is_congested(struct dm_target_callbacks *cb, int bits)
 {
 	struct raid_set *rs = container_of(cb, struct raid_set, callbacks);
+
+	if (rs->raid_type->level == 1)
+		return md_raid1_congested(&rs->md, bits);
 
 	return md_raid5_congested(&rs->md, bits);
 }
@@ -483,6 +507,7 @@ static int raid_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	rs->callbacks.congested_fn = raid_is_congested;
 	dm_table_add_target_callbacks(ti->table, &rs->callbacks);
 
+	mddev_suspend(&rs->md);
 	return 0;
 
 bad:
@@ -656,7 +681,7 @@ static void raid_resume(struct dm_target *ti)
 
 static struct target_type raid_target = {
 	.name = "raid",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
 	.module = THIS_MODULE,
 	.ctr = raid_ctr,
 	.dtr = raid_dtr,
