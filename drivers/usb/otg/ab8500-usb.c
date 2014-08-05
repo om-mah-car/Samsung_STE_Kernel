@@ -4,8 +4,6 @@
  * USB transceiver driver for AB8500 chip
  *
  * Copyright (C) 2010 ST-Ericsson AB
- * Copyright (c) 2012 Sony Mobile Communications AB
- *
  * Mian Yousaf Kaukab <mian.yousaf.kaukab@stericsson.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -40,9 +38,15 @@
 #include <linux/kernel_stat.h>
 #include <linux/pm_qos_params.h>
 #include <linux/wakelock.h>
+#include <linux/usb/ab8500-otg.h>
+#include <linux/input/ab8505_micro_usb_iddet.h>
 
 static struct wake_lock ab8500_musb_wakelock;
+/* For notification to usb switch driver */
+struct blocking_notifier_head micro_usb_switch_notifier =
+	BLOCKING_NOTIFIER_INIT(micro_usb_switch_notifier);
 
+#define AB8500_MAIN_WD_CTRL_REG 0x01
 #define AB8500_USB_LINE_STAT_REG 0x80
 #define AB8500_USB_PHY_CTRL_REG 0x8A
 #define AB8500_VBUS_CTRL_REG 0x82
@@ -54,10 +58,15 @@ static struct wake_lock ab8500_musb_wakelock;
 #define AB8500_BIT_OTG_STAT_ID (1 << 0)
 #define AB8500_BIT_PHY_CTRL_HOST_EN (1 << 0)
 #define AB8500_BIT_PHY_CTRL_DEVICE_EN (1 << 1)
+#define AB8500_BIT_WD_CTRL_ENABLE (1 << 0)
+#define AB8500_BIT_WD_CTRL_KICK (1 << 1)
 #define AB8500_BIT_VBUS_ENABLE (1 << 0)
 
 #define AB8500_V1x_LINK_STAT_WAIT (HZ/10)
+#define AB8500_WD_KICK_DELAY_US 100 /* usec */
+#define AB8500_WD_V11_DISABLE_DELAY_US 100 /* usec */
 #define AB8500_V20_31952_DISABLE_DELAY_US 100 /* usec */
+#define AB8500_WD_V10_DISABLE_DELAY_MS 100 /* ms */
 
 /* Registers in bank 0x11 */
 #define AB8500_BANK12_ACCESS	0x00
@@ -76,6 +85,12 @@ static bool usb_pm_qos_is_latency_0;
 #define PUBLIC_ID_BACKUPRAM1 (U8500_BACKUPRAM1_BASE + 0x0FC0)
 #define MAX_USB_SERIAL_NUMBER_LEN 31
 #define AB8505_USB_LINE_STAT_REG 0x94
+
+#define AB8500_USB_CHARGER_DETECTION_ENABLE 0x1
+#define AB8500_USB_CHARGER_DETECTION_DISABLE 0x0
+
+#define AB8500_USB_LINE_CTRL2_REG      0x82
+#define AB8500_USBCHARGDETENA		0x01
 
 /* Usb line status register */
 enum ab8500_usb_link_status {
@@ -155,14 +170,41 @@ struct ab8500_usb {
 	struct regulator *v_ulpi;
 	struct delayed_work work_usb_workaround;
 	bool sysfs_flag;
-	int prevous_link_status_state;
-	bool RIDA;
+	int previous_link_status_state;
+	struct notifier_block usb_nb;
+	bool enable_charging_detection;
+	struct notifier_block linkstatus_nb;
 };
 
 static inline struct ab8500_usb *xceiv_to_ab(struct otg_transceiver *x)
 {
 	return container_of(x, struct ab8500_usb, otg);
 }
+
+static void ab8500_usb_wd_workaround(struct ab8500_usb *ab)
+{
+	abx500_set_register_interruptible(ab->dev,
+		AB8500_SYS_CTRL2_BLOCK,
+		AB8500_MAIN_WD_CTRL_REG,
+		AB8500_BIT_WD_CTRL_ENABLE);
+
+	udelay(AB8500_WD_KICK_DELAY_US);
+
+	abx500_set_register_interruptible(ab->dev,
+		AB8500_SYS_CTRL2_BLOCK,
+		AB8500_MAIN_WD_CTRL_REG,
+		(AB8500_BIT_WD_CTRL_ENABLE
+		| AB8500_BIT_WD_CTRL_KICK));
+
+	if (!is_ab8500_1p0_or_earlier(ab->ab8500))
+		udelay(AB8500_WD_V11_DISABLE_DELAY_US);
+
+	abx500_set_register_interruptible(ab->dev,
+		AB8500_SYS_CTRL2_BLOCK,
+		AB8500_MAIN_WD_CTRL_REG,
+		0);
+}
+
 static void ab8500_usb_load(struct work_struct *work)
 {
 	int cpu;
@@ -178,8 +220,10 @@ static void ab8500_usb_load(struct work_struct *work)
 	if ((num_irqs > old_num_irqs) &&
 		(num_irqs - old_num_irqs) > USB_LIMIT) {
 
+		/*
 		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
 					     "usb", 1000000);
+		*/
 		if (!usb_pm_qos_is_latency_0) {
 
 			pm_qos_add_request(&usb_pm_qos_latency,
@@ -193,9 +237,10 @@ static void ab8500_usb_load(struct work_struct *work)
 				pm_qos_remove_request(&usb_pm_qos_latency);
 				usb_pm_qos_is_latency_0 = false;
 		}
-
+		/*
 		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
 					     "usb", PRCMU_QOS_DEFAULT_VALUE);
+		*/
 	}
 	old_num_irqs = num_irqs;
 
@@ -252,6 +297,8 @@ static void ab8500_usb_phy_enable(struct ab8500_usb *ab, bool sel_host)
 
 	clk_enable(ab->sysclk);
 
+	ab8500_usb_regulator_ctrl(ab, sel_host, true);
+
 	prcmu_qos_update_requirement(PRCMU_QOS_APE_OPP,
 				     (char *)dev_name(ab->dev),
 				     PRCMU_QOS_APE_OPP_MAX);
@@ -288,6 +335,7 @@ static void ab8500_usb_phy_disable(struct ab8500_usb *ab, bool sel_host)
 			AB8500_BIT_PHY_CTRL_DEVICE_EN;
 
 	ab8500_usb_wd_linkstatus(ab,bit);
+
 	abx500_mask_and_set_register_interruptible(ab->dev,
 				AB8500_USB,
 				AB8500_USB_PHY_CTRL_REG,
@@ -295,6 +343,8 @@ static void ab8500_usb_phy_disable(struct ab8500_usb *ab, bool sel_host)
 				0);
 
 	/* Needed to disable the phy.*/
+	ab8500_usb_wd_workaround(ab);
+
 	clk_disable(ab->sysclk);
 
 	ab8500_usb_regulator_ctrl(ab, sel_host, false);
@@ -322,9 +372,39 @@ static void ab8500_usb_phy_disable(struct ab8500_usb *ab, bool sel_host)
 static int ab8505_usb_link_status_update(struct ab8500_usb *ab,
 				enum ab8505_usb_link_status lsts) {
 	enum usb_xceiv_events event = 0;
+	u8 val = 0;
 
-	dev_dbg(ab->dev, "ab8505_usb_link_status_update %d\n", lsts);
+	dev_info(ab->dev, "ab8505_usb_link_status_update %d\n", lsts);
 
+	/*
+	 * Spurious link_status interrupts are seen at the time of
+	 * disconnection of a device in RIDA state
+	 */
+	if (ab->previous_link_status_state == USB_LINK_ACA_RID_A_8505 &&
+			(lsts == USB_LINK_STD_HOST_NC_8505))
+		return 0;
+
+	if (ab->enable_charging_detection) {
+		/*
+		 * Disable Charging Detection
+		 * Write @0x0582 =0x00
+		 */
+		abx500_mask_and_set_register_interruptible(ab->dev,
+			AB8500_USB,
+			AB8500_USB_LINE_CTRL2_REG,
+			AB8500_USBCHARGDETENA,
+			AB8500_USB_CHARGER_DETECTION_DISABLE);
+
+		/* Read @0x0580 link_status */
+		(void)abx500_get_register_interruptible(ab->dev,
+			AB8500_USB, AB8505_USB_LINE_STAT_REG, &val);
+
+		val = (val >> 3) & 0x1F;
+		lsts = (enum ab8500_usb_link_status) val;
+		ab->enable_charging_detection = false;
+	}
+
+	ab->previous_link_status_state = lsts;
 	switch (lsts) {
 	case USB_LINK_ACA_RID_B_8505:
 		event = USB_EVENT_RIDB;
@@ -333,10 +413,6 @@ static int ab8505_usb_link_status_update(struct ab8500_usb *ab,
 	case USB_LINK_RESERVED1_8505:
 	case USB_LINK_RESERVED2_8505:
 	case USB_LINK_RESERVED3_8505:
-		if (ab->mode == USB_PERIPHERAL)
-			atomic_notifier_call_chain(&ab->otg.notifier,
-						USB_EVENT_CLEAN,
-						&ab->vbus_draw);
 		ab->mode = USB_IDLE;
 		ab->otg.default_a = false;
 		ab->vbus_draw = 0;
@@ -349,21 +425,22 @@ static int ab8505_usb_link_status_update(struct ab8500_usb *ab,
 	case USB_LINK_STD_HOST_NC_8505:
 	case USB_LINK_STD_HOST_C_NS_8505:
 	case USB_LINK_STD_HOST_C_S_8505:
+	case USB_LINK_CDP_8505:
+	case USB_LINK_CHARGERPORT_NOT_OK_8505:
 		if (ab->mode == USB_HOST) {
 			ab->mode = USB_PERIPHERAL;
 			ab8500_usb_host_phy_dis(ab);
+			ab8500_usb_peri_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 							USB_EVENT_CLEAN,
 							&ab->vbus_draw);
-			ab8500_usb_peri_phy_en(ab);
 		}
 		if (ab->mode == USB_IDLE) {
 			ab->mode = USB_PERIPHERAL;
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_peri_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_peri_phy_en(ab);
 		}
 		if (event != USB_EVENT_RIDC)
 			event = USB_EVENT_VBUS;
@@ -374,19 +451,17 @@ static int ab8505_usb_link_status_update(struct ab8500_usb *ab,
 		if (ab->mode == USB_PERIPHERAL) {
 			ab->mode = USB_HOST;
 			ab8500_usb_peri_phy_dis(ab);
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_host_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_host_phy_en(ab);
 		}
 		if (ab->mode == USB_IDLE) {
 			ab->mode = USB_HOST;
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_host_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_host_phy_en(ab);
 		}
 		ab->otg.default_a = true;
 		if (event != USB_EVENT_RIDA)
@@ -413,35 +488,53 @@ static int ab8505_usb_link_status_update(struct ab8500_usb *ab,
 static int ab8500_usb_link_status_update(struct ab8500_usb *ab,
 				enum ab8500_usb_link_status lsts) {
 	enum usb_xceiv_events event = 0;
+	u8 val = 0;
 
-	dev_dbg(ab->dev, "ab8500_usb_link_status_update %d\n", lsts);
-	if (((ab->RIDA) && (lsts == 1)) || ((ab->RIDA) && (lsts == 2)))
+	dev_info(ab->dev, "ab8500_usb_link_status_update %d\n", lsts);
+
+	/*
+	 * Spurious link_status interrupts are seen in case of a
+	 * disconnection of a device in IDGND and RIDA stage
+	 */
+	if (ab->previous_link_status_state == USB_LINK_HM_IDGND_8500 &&
+			(lsts == USB_LINK_STD_HOST_C_NS_8500 ||
+			 lsts == USB_LINK_STD_HOST_NC_8500))
 		return 0;
+	if (ab->previous_link_status_state == USB_LINK_ACA_RID_A_8500 &&
+			 lsts == USB_LINK_STD_HOST_NC_8500)
+		return 0;
+
+	if (ab->enable_charging_detection) {
+		/*
+		 * Disable Charging Detection
+		 * Write @0x0582 =0x00
+		 */
+		abx500_mask_and_set_register_interruptible(ab->dev,
+			AB8500_USB,
+			AB8500_USB_LINE_CTRL2_REG,
+			AB8500_USBCHARGDETENA,
+			AB8500_USB_CHARGER_DETECTION_DISABLE);
+
+		/* Read @0x0580 link_status */
+		(void)abx500_get_register_interruptible(ab->dev,
+				AB8500_USB, AB8500_USB_LINE_STAT_REG, &val);
+
+		val = (val >> 3) & 0x0F;
+		lsts = (enum ab8500_usb_link_status) val;
+		ab->enable_charging_detection = false;
+	}
+
+	ab->previous_link_status_state = lsts;
 	switch (lsts) {
 	case USB_LINK_ACA_RID_B_8500:
 		event = USB_EVENT_RIDB;
 	case USB_LINK_NOT_CONFIGURED_8500:
 	case USB_LINK_NOT_VALID_LINK_8500:
-		if ((ab->mode == USB_HOST) && (event == USB_EVENT_RIDB)) {
-			atomic_notifier_call_chain(&ab->otg.notifier,
-					USB_EVENT_NONE,
-					&ab->vbus_draw);
-			ab8500_usb_host_phy_dis(ab);
-			atomic_notifier_call_chain(&ab->otg.notifier,
-					USB_EVENT_CLEAN,
-					&ab->vbus_draw);
-		}
-		if (ab->mode == USB_PERIPHERAL)
-			atomic_notifier_call_chain(&ab->otg.notifier,
-					   USB_EVENT_CLEAN,
-					   &ab->vbus_draw);
 		ab->mode = USB_IDLE;
 		ab->otg.default_a = false;
 		ab->vbus_draw = 0;
 		if (event != USB_EVENT_RIDB)
 			event = USB_EVENT_NONE;
-		if (ab->RIDA)
-			ab->RIDA = false;
 		break;
 	case USB_LINK_ACA_RID_C_NM_8500:
 	case USB_LINK_ACA_RID_C_HS_8500:
@@ -456,43 +549,38 @@ static int ab8500_usb_link_status_update(struct ab8500_usb *ab,
 		if (ab->mode == USB_HOST) {
 			ab->mode = USB_PERIPHERAL;
 			ab8500_usb_host_phy_dis(ab);
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_peri_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_peri_phy_en(ab);
 		}
 		if (ab->mode == USB_IDLE) {
 			ab->mode = USB_PERIPHERAL;
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_peri_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_peri_phy_en(ab);
 		}
 		if (event != USB_EVENT_RIDC)
 			event = USB_EVENT_VBUS;
 		break;
 	case USB_LINK_ACA_RID_A_8500:
 		event = USB_EVENT_RIDA;
-		ab->RIDA = true;
 	case USB_LINK_HM_IDGND_8500:
 		if (ab->mode == USB_PERIPHERAL) {
 			ab->mode = USB_HOST;
 			ab8500_usb_peri_phy_dis(ab);
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_host_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_host_phy_en(ab);
 		}
 		if (ab->mode == USB_IDLE) {
 			ab->mode = USB_HOST;
-			ab8500_usb_regulator_ctrl(ab, true, true);
+			ab8500_usb_host_phy_en(ab);
 			atomic_notifier_call_chain(&ab->otg.notifier,
 						   USB_EVENT_PREPARE,
 						   &ab->vbus_draw);
-			ab8500_usb_host_phy_en(ab);
 		}
 		ab->otg.default_a = true;
 		if (event != USB_EVENT_RIDA)
@@ -512,7 +600,6 @@ static int ab8500_usb_link_status_update(struct ab8500_usb *ab,
 	case USB_LINK_RESERVED_8500:
 		break;
 	}
-	ab->prevous_link_status_state = lsts;
 	return 0;
 }
 
@@ -546,6 +633,15 @@ static int abx500_usb_link_status_update(struct ab8500_usb *ab)
 	return ret;
 }
 
+static int ab8505_usb_linkstatus_notifier(struct notifier_block *nb,
+		                                        unsigned long event, void *data)
+{
+	int ret = 0;
+	struct ab8500_usb *ab =
+			container_of(nb, struct ab8500_usb, linkstatus_nb);
+	ret = abx500_usb_link_status_update(ab);
+	return ret;
+}
 
 static void ab8500_usb_delayed_work(struct work_struct *work)
 {
@@ -558,7 +654,6 @@ static irqreturn_t ab8500_usb_disconnect_irq(int irq, void *data)
 {
 	struct ab8500_usb *ab = (struct ab8500_usb *) data;
 	enum usb_xceiv_events event = USB_EVENT_NONE;
-
 	/* Link status will not be updated till phy is disabled. */
 	if (ab->mode == USB_HOST) {
 		ab->otg.default_a = false;
@@ -572,6 +667,12 @@ static irqreturn_t ab8500_usb_disconnect_irq(int irq, void *data)
 		atomic_notifier_call_chain(&ab->otg.notifier,
 				event, &ab->vbus_draw);
 		ab8500_usb_peri_phy_dis(ab);
+		atomic_notifier_call_chain(&ab->otg.notifier,
+				USB_EVENT_CLEAN,
+				&ab->vbus_draw);
+		ab->mode = USB_IDLE;
+		ab->otg.default_a = false;
+		ab->vbus_draw = 0;
 	}
 	if (is_ab8500_2p0(ab->ab8500)) {
 		if (ab->mode == USB_DEDICATED_CHG) {
@@ -630,12 +731,10 @@ static int ab8500_usb_start_srp(struct otg_transceiver *otg, unsigned mA)
 		return -ENODEV;
 
 	ab = xceiv_to_ab(otg);
-
+	ab8500_usb_peri_phy_en(ab);
 	atomic_notifier_call_chain(&ab->otg.notifier,
 				   USB_EVENT_PREPARE,
 				   &ab->vbus_draw);
-
-	ab8500_usb_peri_phy_en(ab);
 
 	return 0;
 }
@@ -747,6 +846,47 @@ static int ab8500_usb_boot_detect(struct ab8500_usb *ab)
 	return 0;
 }
 
+static int ab8500_usb_handle_notifier(struct notifier_block *nb,
+				unsigned long event, void *data)
+{
+	int ret = 0;
+
+	struct ab8500_usb *ab =
+		container_of(nb, struct ab8500_usb, usb_nb);
+
+	switch(event) {
+		case USB_PHY_ENABLE:
+			ret = abx500_mask_and_set_register_interruptible(
+					ab->dev,
+					AB8500_USB,
+					AB8500_USB_PHY_CTRL_REG,
+					AB8500_BIT_PHY_CTRL_DEVICE_EN,
+					AB8500_BIT_PHY_CTRL_DEVICE_EN);
+			if (ret < 0)
+				dev_err(ab->dev, "device enable failed\n");
+			break;
+		case USB_PHY_DISABLE:
+			ret = abx500_mask_and_set_register_interruptible(ab->dev,
+					AB8500_USB,
+					AB8500_USB_PHY_CTRL_REG,
+					AB8500_BIT_PHY_CTRL_DEVICE_EN |
+					AB8500_BIT_PHY_CTRL_HOST_EN,
+					0);
+			if (ret < 0)
+				dev_err(ab->dev, "host & device disable"
+						"failed\n");
+			break;
+		case USB_PHY_RESET:
+			ab8500_usb_boot_detect(ab);
+			break;
+		default:
+			dev_info(ab->dev, "Wrong event\n");
+			break;
+	}
+
+	return ret;
+}
+
 static void ab8500_usb_regulator_put(struct ab8500_usb *ab)
 {
 
@@ -812,7 +952,7 @@ static int ab8500_usb_irq_setup(struct platform_device *pdev,
 	int err;
 	int irq;
 
-	if (!is_ab8500_1p0_or_earlier(ab->ab8500)) {
+	if (!is_ab8500_1p0_or_earlier(ab->ab8500) && !is_ab8505(ab->ab8500)) {
 		irq = platform_get_irq_byname(pdev, "USB_LINK_STATUS");
 		if (irq < 0) {
 			err = irq;
@@ -1010,7 +1150,13 @@ static int __devinit ab8500_usb_probe(struct platform_device *pdev)
 	err = ab8500_usb_irq_setup(pdev, ab);
 	if (err < 0)
 		goto fail2;
-
+#if defined(CONFIG_INPUT_AB8505_MICRO_USB_DETECT)
+	if (is_ab8505(ab->ab8500)) {
+		ab->linkstatus_nb.notifier_call =
+			ab8505_usb_linkstatus_notifier;
+		micro_usb_register_usb_notifier(&ab->linkstatus_nb);
+	}
+#endif
 	err = otg_set_transceiver(&ab->otg);
 	if (err) {
 		dev_err(&pdev->dev, "Can't register transceiver\n");
@@ -1019,20 +1165,7 @@ static int __devinit ab8500_usb_probe(struct platform_device *pdev)
 
 	/* Write Phy tuning values */
 	if (!is_ab8500_2p0_or_earlier(ab->ab8500)) {
-		u8 save_val;
-
-		/* Enable the PBT/Bank 0x12 access
-		 * Save old bank settings for
-		 * later restore
-		 */
-		ret = abx500_get_register_interruptible(ab->dev,
-							AB8500_DEVELOPMENT,
-							AB8500_BANK12_ACCESS,
-							&save_val);
-		if (ret < 0)
-			printk(KERN_ERR "Failed to get bank12"
-					      " access ret=%d\n", ret);
-
+		/* Enable the PBT/Bank 0x12 access */
 		ret = abx500_set_register_interruptible(ab->dev,
 							AB8500_DEVELOPMENT,
 							AB8500_BANK12_ACCESS,
@@ -1041,40 +1174,72 @@ static int __devinit ab8500_usb_probe(struct platform_device *pdev)
 			printk(KERN_ERR "Failed to enable bank12"
 						" access ret=%d\n", ret);
 
-		ret = abx500_set_register_interruptible(ab->dev,
-							AB8500_DEBUG,
-							AB8500_USB_PHY_TUNE1,
-							0xC8);
-		if (ret < 0)
-			printk(KERN_ERR "Failed to set PHY_TUNE1"
-						" register ret=%d\n", ret);
+		if (is_ab8505(ab->ab8500)) {
+			/* Apply new Phy tuning values
+			 * for devices that use ab8505's internal micro USB switch */
+			ret = abx500_set_register_interruptible(ab->dev,
+								AB8500_DEBUG,
+								AB8500_USB_PHY_TUNE1,
+								0xD9);
+			if (ret < 0)
+				printk(KERN_ERR "Failed to set PHY_TUNE1"
+							" register ret=%d\n", ret);
 
-		ret = abx500_set_register_interruptible(ab->dev,
-							AB8500_DEBUG,
-							AB8500_USB_PHY_TUNE2,
-							0x00);
-		if (ret < 0)
-			printk(KERN_ERR "Failed to set PHY_TUNE2"
-						" register ret=%d\n", ret);
+				ret = abx500_set_register_interruptible(ab->dev,
+								AB8500_DEBUG,
+								AB8500_USB_PHY_TUNE2,
+								0x00);
+			if (ret < 0)
+				printk(KERN_ERR "Failed to set PHY_TUNE2"
+							" register ret=%d\n", ret);
 
-		ret = abx500_set_register_interruptible(ab->dev,
-							AB8500_DEBUG,
-							AB8500_USB_PHY_TUNE3,
-							0x78);
-		if (ret < 0)
-			printk(KERN_ERR "Failed to set PHY_TUNE3"
-						" register ret=%d\n", ret);
+				ret = abx500_set_register_interruptible(ab->dev,
+								AB8500_DEBUG,
+								AB8500_USB_PHY_TUNE3,
+								0xFC);
 
-		/* Switch back to previous mode/disable Bank 0x12 access */
+			if (ret < 0)
+				printk(KERN_ERR "Failed to set PHY_TUNE3"
+							" regester ret=%d\n", ret);
+		} else {
+			ret = abx500_set_register_interruptible(ab->dev,
+								AB8500_DEBUG,
+								AB8500_USB_PHY_TUNE1,
+								0xD8);
+			if (ret < 0)
+				printk(KERN_ERR "Failed to set PHY_TUNE1"
+							" register ret=%d\n", ret);
+
+				ret = abx500_set_register_interruptible(ab->dev,
+								AB8500_DEBUG,
+								AB8500_USB_PHY_TUNE2,
+								0x00);
+			if (ret < 0)
+				printk(KERN_ERR "Failed to set PHY_TUNE2"
+							" register ret=%d\n", ret);
+
+				ret = abx500_set_register_interruptible(ab->dev,
+								AB8500_DEBUG,
+								AB8500_USB_PHY_TUNE3,
+								0xFC);
+
+			if (ret < 0)
+				printk(KERN_ERR "Failed to set PHY_TUNE3"
+							" regester ret=%d\n", ret);
+		}
+
+		/* Switch to normal mode/disable Bank 0x12 access */
 		ret = abx500_set_register_interruptible(ab->dev,
-							AB8500_DEVELOPMENT,
-							AB8500_BANK12_ACCESS,
-							save_val);
+						AB8500_DEVELOPMENT,
+						AB8500_BANK12_ACCESS,
+						0x00);
+
 		if (ret < 0)
 			printk(KERN_ERR "Failed to switch bank12"
 						" access ret=%d\n", ret);
 	}
 	/* Needed to enable ID detection. */
+	ab8500_usb_wd_workaround(ab);
 
 	prcmu_qos_add_requirement(PRCMU_QOS_APE_OPP,
 			(char *)dev_name(ab->dev), PRCMU_QOS_DEFAULT_VALUE);
@@ -1084,17 +1249,38 @@ static int __devinit ab8500_usb_probe(struct platform_device *pdev)
 				  PRCMU_QOS_DEFAULT_VALUE);
 	wake_lock_init(&ab8500_musb_wakelock, WAKE_LOCK_SUSPEND, "ab8500-usb");
 
-	err = ab8500_usb_boot_detect(ab);
-	if (err < 0)
-		goto fail3;
+	if (is_ab8500(ab->ab8500)) {
+		err = ab8500_usb_boot_detect(ab);
+		if (err < 0)
+			goto fail3;
+	} else {
+		ab->usb_nb.notifier_call = ab8500_usb_handle_notifier;
+		err = blocking_notifier_chain_register(&micro_usb_switch_notifier,
+				&ab->usb_nb);
+		if (err < 0)
+			goto fail3;
+	}
 
 	err = ab8500_create_sysfsentries(ab);
 	if (err)
 		goto fail3;
 
+	/* Start Charging detection */
+	abx500_mask_and_set_register_interruptible(ab->dev,
+		AB8500_USB,
+		AB8500_USB_LINE_CTRL2_REG,
+		AB8500_USBCHARGDETENA,
+		AB8500_USB_CHARGER_DETECTION_ENABLE);
+
+	ab->enable_charging_detection = true;
+
 	return 0;
 fail3:
 	ab8500_usb_irq_free(ab);
+#if defined(CONFIG_INPUT_AB8505_MICRO_USB_DETECT)	
+	if (is_ab8505(ab->ab8500))
+		micro_usb_unregister_usb_notifier(&ab->linkstatus_nb);
+#endif
 fail2:
 	clk_put(ab->sysclk);
 fail1:
@@ -1113,7 +1299,10 @@ static int __devexit ab8500_usb_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&ab->dwork);
 
 	cancel_work_sync(&ab->phy_dis_work);
-
+#if defined(CONFIG_INPUT_AB8505_MICRO_USB_DETECT)	
+	if (is_ab8505(ab->ab8500))
+		micro_usb_unregister_usb_notifier(&ab->linkstatus_nb);
+#endif	
 	otg_set_transceiver(NULL);
 
 	if (ab->mode == USB_HOST)
@@ -1126,6 +1315,10 @@ static int __devexit ab8500_usb_remove(struct platform_device *pdev)
 	ab8500_usb_regulator_put(ab);
 
 	platform_set_drvdata(pdev, NULL);
+
+	if (is_ab8505(ab->ab8500))
+		blocking_notifier_chain_unregister(&micro_usb_switch_notifier,
+				&ab->usb_nb);
 
 	kfree(ab);
 

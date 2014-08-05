@@ -393,9 +393,14 @@ __acquires(&port->port_lock)
 		 * NOTE that we may keep sending data for a while after
 		 * the TTY closed (dev->ioport->port_tty is NULL).
 		 */
-		spin_unlock(&port->port_lock);
+		/* Fix queue synchronization issue in the gadget serial driver.
+		 * ( Removed port lock code. )
+		 * original code :
+		 *	spin_unlock(&port->port_lock);
+		 *	status = usb_ep_queue(in, req, GFP_ATOMIC);
+ 		 *	spin_lock(&port->port_lock);
+		 */
 		status = usb_ep_queue(in, req, GFP_ATOMIC);
-		spin_lock(&port->port_lock);
 
 		if (status) {
 			pr_debug("%s: %s %s err %d\n",

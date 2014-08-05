@@ -31,77 +31,47 @@
 #include <plat/gpio-nomadik.h>
 #include <plat/pincfg.h>
 #include <mach/board-sec-u8500.h>
+
 static struct class *usb_switch_class;
 extern struct class *sec_class;
-
 static struct device *micro_usb_switch;
-
+extern void disable_irq(unsigned int irq);
+extern void enable_irq(unsigned int irq);
 static struct workqueue_struct *usb_switch_workqueue;
 static BLOCKING_NOTIFIER_HEAD(usb_switch_notifier);
 
 /* register addresses*/
-#define FSA9490_DEVICE_ID_REGISTER 0x1
-#define FSA9490_CONTROL_REGISTER 0x2
-#define FSA9490_INTERRUPT_1_REGISTER 0x3
-#define FSA9490_INTERRUPT_2_REGISTER 0x4
-#define FSA9490_INTERRUPT_MASK_1_REGISTER 0x5
-#define FSA9490_INTERRUPT_MASK_2_REGISTER 0x6
-#define FSA9490_ADC_REGISTER 0x7
-#define FSA9490_TIMING_1_REGISTER 0x8
-#define FSA9490_TIMING_2_REGISTER 0x9
-#define FSA9490_DEVICE_TYPE_1_REGISTER 0xa
-#define FSA9490_DEVICE_TYPE_2_REGISTER 0xb
-#define FSA9490_BUTTON_1_REGISTER 0xc
-#define FSA9490_BUTTON_2_REGISTER 0xd
-#define FSA9490_CAR_KIT_STATUS_REGISTER 0xe
-#define FSA9490_CAR_KIT_INTERRUPT_1_REGISTER 0xf
-#define FSA9490_CAR_KIT_INTERRUPT_2_REGISTER 0x10
-#define FSA9490_CAR_KIT_INTERRUPT_1_MASK_REGISTER 0x11
-#define FSA9490_CAR_KIT_INTERRUPT_2_MASK_REGISTER 0x12
-#define FSA9490_MANUAL_SWITCH_1_REGISTER 0x13
-#define FSA9490_MANUAL_SWITCH_2_REGISTER 0x14
+#define FSA9490_DEVICE_ID_REGISTER	0x1
+#define FSA9490_CONTROL_REGISTER	0x2
+#define FSA9490_INTERRUPT_1_REGISTER	0x3
+#define FSA9490_INTERRUPT_2_REGISTER	0x4
+#define FSA9490_INTERRUPT_MASK_1_REGISTER	0x5
+#define FSA9490_INTERRUPT_MASK_2_REGISTER	0x6
+#define FSA9490_ADC_REGISTER	0x7
+#define FSA9490_TIMING_1_REGISTER	0x8
+#define FSA9490_TIMING_2_REGISTER	0x9
+#define FSA9490_DEVICE_TYPE_1_REGISTER	0xA
+#define FSA9490_DEVICE_TYPE_2_REGISTER	0xB
+#define FSA9490_BUTTON_1_REGISTER	0xC
+#define FSA9490_BUTTON_2_REGISTER	0xD
+#define FSA9490_CAR_KIT_STATUS_REGISTER	0xE
+#define FSA9490_CAR_KIT_INTERRUPT_1_REGISTER	0xF
+#define FSA9490_CAR_KIT_INTERRUPT_2_REGISTER	0x10
+#define FSA9490_CAR_KIT_INTERRUPT_1_MASK_REGISTER	0x11
+#define FSA9490_CAR_KIT_INTERRUPT_2_MASK_REGISTER	0x12
+#define FSA9490_MANUAL_SWITCH_1_REGISTER	0x13
+#define FSA9490_MANUAL_SWITCH_2_REGISTER	0x14
 
-/* Device Type 1 */
 #define DEV_USB_OTG		(1 << 7)
-#define DEV_DEDICATED_CHG	(1 << 6)
 #define DEV_USB_CHG		(1 << 5)
-#define DEV_CAR_KIT		(1 << 4)
-#define DEV_UART		(1 << 3)
 #define DEV_USB			(1 << 2)
-
 #define DEV_T1_USB_MASK		(DEV_USB_OTG | DEV_USB)
-#define DEV_T1_UART_MASK	(DEV_UART)
-#define DEV_T1_CHARGER_MASK	(DEV_DEDICATED_CHG | DEV_USB_CHG | DEV_CAR_KIT)
-
-/* Device Type 2 */
-#define DEV_AV			(1 << 6)
-#define DEV_TTY			(1 << 5)
-#define DEV_PPD			(1 << 4)
-#define DEV_JIG_UART_OFF	(1 << 3)
-#define DEV_JIG_UART_ON		(1 << 2)
 #define DEV_JIG_USB_OFF		(1 << 1)
 #define DEV_JIG_USB_ON		(1 << 0)
-
 #define DEV_T2_USB_MASK		(DEV_JIG_USB_OFF | DEV_JIG_USB_ON)
-#define DEV_T2_UART_MASK	(DEV_JIG_UART_OFF | DEV_JIG_UART_ON)
-#define DEV_T2_JIG_MASK		(DEV_JIG_USB_OFF | DEV_JIG_USB_ON | \
-				DEV_JIG_UART_OFF)
-
-#define SW_VAUDIO		((4 << 5) | (4 << 2) | (1 << 1) | (1 << 0))
-#define SW_UART			((3 << 5) | (3 << 2))
 #define SW_AUDIO		((2 << 5) | (2 << 2) | (1 << 1) | (1 << 0))
-#define SW_DHOST		((1 << 5) | (1 << 2) | (1 << 1) | (1 << 0))
-#define SW_AUTO			((0 << 5) | (0 << 2))
-#define SW_USB_OPEN		(1 << 0)
-#define SW_ALL_OPEN		(0)
-
-#define CON_SWITCH_OPEN		(1 << 4)
 #define CON_RAW_DATA		(1 << 3)
 #define CON_MANUAL_SW		(1 << 2)
-#define CON_WAIT		(1 << 1)
-#define CON_INT_MASK		(1 << 0)
-#define CON_MASK		(CON_SWITCH_OPEN | CON_RAW_DATA | \
-				CON_MANUAL_SW | CON_WAIT)
 
 /* interrupt control */
 #define FSA9490_ATTACH_MASK_BIT (1<<0)
@@ -118,19 +88,17 @@ static BLOCKING_NOTIFIER_HEAD(usb_switch_notifier);
 
 #define FSA880_DELAY 20
 #define FSA_DELAYED_WORK
-
-/* Return value */
-#define RETURN_OTHER_CABLE	1
-#define RETURN_USB_CABLE	0
+#define VENDOR_ID_MASK 0x7
+#define TI_6111 0x0A
+#define FC_9485 0x00
 
 extern int jig_smd;
-extern unsigned int system_rev;
 
 struct register_bits {
 	unsigned char mask;
 	const char *name;
 	unsigned long event;
-} ;
+};
 
 static struct switch_dev switch_dock = {
 	.name = "dock",
@@ -156,8 +124,6 @@ struct FSA9480_instance {
 	int disabled;
 	struct notifier_block  reboot_notifier;
 	struct wake_lock vbus_wake_lock;
-	int dev1;
-	int dev2;
 };
 
 static struct register_bits device_1_register_bits[] = {
@@ -169,7 +135,6 @@ static struct register_bits device_1_register_bits[] = {
 	{	(1<<5), "USB_Charger", EXTERNAL_USB_CHARGER},
 	{	(1<<6), "Dedicated_Charger", EXTERNAL_DEDICATED_CHARGER},
 	{	(1<<7), "USB_OTG", EXTERNAL_USB_OTG},
-
 };
 
 static struct register_bits device_2_register_bits[] = {
@@ -180,7 +145,7 @@ static struct register_bits device_2_register_bits[] = {
 	{	(1<<4)	, "Phone_powered", EXTERNAL_PHONE_POWERED_DEVICE},
 	{	(1<<5)	, "TTY", EXTERNAL_TTY},
 	{	(1<<6)	, "AV_CABLE", EXTERNAL_AV_CABLE},
-	{	(1<<7)	, "Device_Unknown", EXTERNAL_DEVICE_UNKNOWN},
+	{	(1<<7)	, "Audio_3", EXTERNAL_AUDIO_3},
 };
 
 static struct FSA9480_instance driver_instance = {0};
@@ -319,9 +284,8 @@ static ssize_t show_current_connection_log(unsigned long charger_event)
 /* SW RESET for TI USB:To fix no USB recog problem after jig attach&detach*/
 static void TI_SWreset(struct FSA9480_instance *instance)
 {
-	printk(KERN_INFO "[TSU6111] TI_SW reset ...Start\n");
+	printk(KERN_INFO "[TSU6111] TI_SW reset Start, Disable IRQ\n");
 	disable_irq(instance->irq_bit);
-
 
 	/*Hold SCL&SDA Low more than 30ms*/
 	nmk_config_pin(PIN_CFG(16, GPIO)| PIN_OUTPUT_LOW,false);
@@ -337,10 +301,9 @@ static void TI_SWreset(struct FSA9480_instance *instance)
 	write_FSA9480_register(instance, FSA9490_INTERRUPT_MASK_2_REGISTER, 0x27);
 	write_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, 0x1E);
 
-	mdelay(30);
-	printk(KERN_INFO "[TSU6111] IRQ enable start\n");
+	mdelay(20);
+	printk(KERN_INFO "[TSU6111] TI_SWreset Done, Enable IRQ\n");
 	enable_irq(instance->irq_bit);
-	printk(KERN_INFO "[TSU6111] TI_SWreset ...Done\n");
 }
 
 static ssize_t show_current_connection(struct device *dev, struct device_attribute *attr, char *buf)
@@ -437,6 +400,22 @@ static ssize_t show_usb_state(struct device *dev, struct device_attribute *attr,
 	return snprintf(buf, 25, "USB_STATE_NOTCONFIGURED\n");
 }
 
+static ssize_t show_adc(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	unsigned char adc;
+	int ret;
+
+	ret = read_FSA9480_register(&driver_instance, FSA9490_ADC_REGISTER, &adc);
+	if (ret < 0) {
+		dev_err(driver_instance.dev,
+			"%s: err at read adc %d\n", __func__, adc);
+		return snprintf(buf, 9, "UNKNOWN\n");
+	}
+
+	return snprintf(buf, 4, "%x\n", adc);
+}
+
 static struct device_attribute FSA9480_device_attrs[] = {
 	__ATTR(connection, 0444, show_current_connection, NULL),
 	__ATTR(charger, 0444, show_charger_connection, NULL),
@@ -445,6 +424,7 @@ static struct device_attribute FSA9480_device_attrs[] = {
 };
 
 static DEVICE_ATTR(usb_state, 0444, show_usb_state, NULL);
+static DEVICE_ATTR(adc, 0444, show_adc, NULL);
 
 static int FSA9480_readproc(char *page, char **start, off_t off,
 		int count, int *eof, void *data)
@@ -556,12 +536,11 @@ static unsigned long current_connection_mask(struct FSA9480_instance *instance)
 	}
 
 	if (event) {
-		/* Interrupt 1, 2 REG Clear */
+		/* Interrupt 1, 2 Register Clear */
 		read_FSA9480_register(instance, FSA9490_INTERRUPT_2_REGISTER, &c);
 		read_FSA9480_register(instance, FSA9490_INTERRUPT_1_REGISTER, &c);
-		event |= (c&FSA9490_ATTACH_MASK_BIT) ? USB_SWITCH_CONNECTION_EVENT : 0;
+		event |= (c & FSA9490_ATTACH_MASK_BIT) ? USB_SWITCH_CONNECTION_EVENT : 0;
 	}
-
 	return event;
 }
 
@@ -572,12 +551,12 @@ static unsigned long get_current_connection_mask(struct FSA9480_instance *instan
 	unsigned long event = 0;
 	int event_found = 0;
 
-	printk(KERN_INFO "%s entered !!!\n", __func__);
+	printk(KERN_INFO "%s entered\n", __func__);
 	read_FSA9480_register(instance, FSA9490_INTERRUPT_1_REGISTER, &c);
-	printk(KERN_INFO "fsa_detect_dev: intr reg: 0x%x\n", c);
+	printk(KERN_INFO "%s : Read Interrupt 1 Register: %#x\n", __func__, c);
 
-	event |= (c&FSA9490_ATTACH_MASK_BIT) ? USB_SWITCH_CONNECTION_EVENT : 0;
-	event |= (c&FSA9490_DETACH_MASK_BIT) ? USB_SWITCH_DISCONNECTION_EVENT : 0;
+	event |= (c & FSA9490_ATTACH_MASK_BIT) ? USB_SWITCH_CONNECTION_EVENT : 0;
+	event |= (c & FSA9490_DETACH_MASK_BIT) ? USB_SWITCH_DISCONNECTION_EVENT : 0;
 
 	if (instance->current_switch) {
 		if (instance->current_switch->valid_registers[FSA9490_INTERRUPT_2_REGISTER])
@@ -592,7 +571,6 @@ static unsigned long get_current_connection_mask(struct FSA9480_instance *instan
 				break;
 			}
 		}
-
 		if (!event_found) {
 			read_FSA9480_register(instance, FSA9490_DEVICE_TYPE_2_REGISTER, &c);
 			c &= instance->current_switch->valid_device_register_2_bits;
@@ -604,7 +582,6 @@ static unsigned long get_current_connection_mask(struct FSA9480_instance *instan
 			}
 		}
 	}
-
 	return event ;
 }
 
@@ -619,179 +596,71 @@ static void switch_dock_init(void)
 
 static void usb_switch_notify_clients(struct work_struct *work)
 {
-	char adc;
+	char c, adc, id;
 
 #if defined(FSA_DELAYED_WORK)
 	struct FSA9480_instance *instance = container_of(work, struct FSA9480_instance, notifier_queue.work);
 #else
 	struct FSA9480_instance *instance = container_of(work, struct FSA9480_instance, notifier_queue);
 #endif
+	/* Read Device ID */
+	read_FSA9480_register(instance, FSA9490_DEVICE_ID_REGISTER, &id);
 
+	/* Check Device */
 	instance->prev_event = instance->last_event;
 	instance->last_event = get_current_connection_mask(instance);
 
-	if (instance->prev_event & (EXTERNAL_JIG_UART_ON | EXTERNAL_JIG_UART_OFF)
+	/* TSU6111 Bug W/A Case */
+	if (id == TI_6111 && instance->prev_event & (EXTERNAL_JIG_UART_ON | EXTERNAL_JIG_UART_OFF)
 		&& instance->last_event & USB_SWITCH_DISCONNECTION_EVENT) {
-			TI_SWreset(instance);
-			printk(KERN_INFO "[FSA880] S/W reset called.\n");
+		printk(KERN_INFO "S/W Reset Case for TSU6111\n");
+		TI_SWreset(instance);
 	}
 
-	if (instance->last_event == USB_SWITCH_CONNECTION_EVENT) {
-		printk(KERN_INFO "%s: only insert event occured but no devices\n", __func__);
-		read_FSA9480_register(instance, FSA9490_ADC_REGISTER, &adc);
-		msleep(50);
-		instance->last_event = current_device_mask(instance);
-		instance->last_event |= USB_SWITCH_CONNECTION_EVENT;
+	/* Desktop Dock Support */
+#ifndef  CONFIG_MACH_CODINA_CHN
+/*weichang.dong remove Desktop Dock Support for codina chn 4.1.2  */
+	if (instance->last_event == (USB_SWITCH_CONNECTION_EVENT | EXTERNAL_AV_CABLE)) {
+		if (id == FC_9485) {	
+			printk(KERN_INFO "%s: GPIO #200 Value : %x\n", __func__, gpio_get_value(200));
 
-		if (instance->last_event == USB_SWITCH_CONNECTION_EVENT)
+			write_FSA9480_register(instance, FSA9490_MANUAL_SWITCH_1_REGISTER, SW_AUDIO);
+			read_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, &c);
+			c &= ~CON_MANUAL_SW & ~CON_RAW_DATA;
+			write_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, c);
+		}	
+		switch_set_state(&switch_dock, 1);
+	} else 
+#endif
+
+    if (instance->last_event == USB_SWITCH_DISCONNECTION_EVENT &&
+			instance->prev_event == (USB_SWITCH_CONNECTION_EVENT | EXTERNAL_AV_CABLE)) {
+		if (id == FC_9485) {	
+			printk(KERN_INFO "%s: GPIO #200 Value : %x\n", __func__, gpio_get_value(200));
+
+			write_FSA9480_register(instance, FSA9490_MANUAL_SWITCH_1_REGISTER, 0x00);
+			read_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, &c);
+			c |= CON_MANUAL_SW | CON_RAW_DATA;
+			write_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, c);
+		}
+		switch_set_state(&switch_dock, 0);
+		if (id == TI_6111)
 			TI_SWreset(instance);
 	}
-
-	printk(KERN_INFO "usb_switch_notify_clients event = 0x%08lx\n", instance->last_event);
+	
+	printk(KERN_INFO "%s : Event = 0x%08lx\n", __func__, instance->last_event);
 
 #ifdef CONFIG_SAMSUNG_LOG_BUF
 	show_current_connection_log(instance->last_event);
 #endif
-
 	blocking_notifier_call_chain(&usb_switch_notifier, instance->last_event, NULL);
-}
-
-
-static int fsa_detect_dev(struct FSA9480_instance *instance)
-{
-
-	char adc, dtype1, dtype2, ret = RETURN_OTHER_CABLE;
-
-	read_FSA9480_register(instance,
-				FSA9490_DEVICE_TYPE_1_REGISTER, &dtype1);
-	read_FSA9480_register(instance,
-				FSA9490_DEVICE_TYPE_2_REGISTER,	&dtype2);
-	read_FSA9480_register(instance, FSA9490_ADC_REGISTER, &adc);
-
-	printk(KERN_INFO "%s: adc:0x%x dtype1:0x%x dtype2:0x%x\n",
-				__func__, adc, dtype1, dtype2);
-
-	/* Attached */
-	if (dtype1 || dtype2) {
-		/* USB */
-		if (dtype1 & DEV_USB || dtype2 & DEV_T2_USB_MASK) {
-			printk(KERN_INFO "%s: usb connect\n", __func__);
-			ret = RETURN_USB_CABLE;
-		/* UART */
-		} else if (dtype1 & DEV_T1_UART_MASK ||
-					dtype2 & DEV_T2_UART_MASK) {
-			printk(KERN_INFO "%s: UART connect\n", __func__);
-			ret = RETURN_OTHER_CABLE;
-		/* CHARGER */
-		} else if (dtype1 & DEV_T1_CHARGER_MASK) {
-			printk(KERN_INFO "%s: Charger connect\n", __func__);
-			ret = RETURN_OTHER_CABLE;
-		/* Desk Dock */
-		} else if (dtype2 & DEV_AV) {
-			printk(KERN_INFO "%s: Deskdock connect\n", __func__);
-			switch_set_state(&switch_dock, 1);
-			gpio_direction_output(200, 1);
-
-			write_FSA9480_register(instance,
-				FSA9490_MANUAL_SWITCH_1_REGISTER, SW_AUDIO);
-
-			read_FSA9480_register(instance,
-				FSA9490_CONTROL_REGISTER, &ret);
-
-			ret &= ~CON_MANUAL_SW & ~CON_RAW_DATA;
-
-			write_FSA9480_register(instance,
-				FSA9490_CONTROL_REGISTER, ret);
-
-			ret = RETURN_OTHER_CABLE;
-#if 0
-		/* Car Dock */
-		} else if (dtype2 & DEV_JIG_UART_ON) {
-			printk(KERN_INFO "%s: Cardock connect\n", __func__);
-			switch_set_state(&switch_dock, 2);
-			ret = RETURN_OTHER_CABLE;
-		} else{
-			printk(KERN_INFO
-				"%s: connect not defined cable!\n", __func__);
-			ret = RETURN_OTHER_CABLE;
-#endif
-		}
-	/* Detached */
-	} else {
-		/* USB */
-		if (instance->dev1 & DEV_USB ||
-				instance->dev2 & DEV_T2_USB_MASK) {
-			printk(KERN_INFO "%s: usb disconnect\n", __func__);
-			ret = RETURN_USB_CABLE;
-		/* UART */
-		} else if (instance->dev1 & DEV_T1_UART_MASK ||
-				instance->dev2 & DEV_T2_UART_MASK) {
-			printk(KERN_INFO "%s: UART disconnect\n", __func__);
-			ret = RETURN_OTHER_CABLE;
-
-		/* CHARGER */
-		} else if (instance->dev1 & DEV_T1_CHARGER_MASK) {
-			printk(KERN_INFO "%s: Charger disconnect\n", __func__);
-			ret = RETURN_OTHER_CABLE;
-		/* Desk Dock */
-		} else if (instance->dev2 & DEV_AV) {
-			printk(KERN_INFO "%s: Deskdock disconnect\n", __func__);
-			switch_set_state(&switch_dock, 0);
-			gpio_direction_output(200, 0);
-
-			read_FSA9480_register(instance,
-					FSA9490_CONTROL_REGISTER, &ret);
-
-			ret |= CON_MANUAL_SW | CON_RAW_DATA;
-			write_FSA9480_register(instance,
-					FSA9490_CONTROL_REGISTER, ret);
-
-			ret = RETURN_OTHER_CABLE;
-
-#if 0
-		/* Car Dock */
-		} else if (instance->dev2 & DEV_JIG_UART_ON) {
-			printk(KERN_INFO
-				"%s: Cardock disconnect\n", __func__);
-			switch_set_state(&switch_dock, 0);
-			ret = RETURN_OTHER_CABLE;
-			TI_SWreset(instance);
-		} else{
-			printk(KERN_INFO
-				"%s: notdefined cable disconect\n", __func__);
-			ret = RETURN_OTHER_CABLE;
-			TI_SWreset(instance);
-#endif
-		}
-	}
-	instance->dev1 = dtype1;
-	instance->dev2 = dtype2;
-
-	return ret;
-
 }
 
 static irqreturn_t FSA9480_irq_thread_fn(int irq, void *data)
 {
 	struct FSA9480_instance *instance = (struct FSA9480_instance *) data;
-	char dev_id;
-	printk(KERN_INFO "FSA9480_irq_thread_fn\n");
-
-	read_FSA9480_register(instance,
-				FSA9490_DEVICE_ID_REGISTER, &dev_id);
-	printk(KERN_INFO "%s: ID:%x = detect_dev run: FSA9485!\n",
-					__func__, dev_id);
-	if (dev_id == 0x00) {
-		printk(KERN_INFO "%s: ID:%x = detect_dev run: FSA9485!\n",
-					__func__, dev_id);
-		fsa_detect_dev(instance);
-	}
-
-	printk(KERN_INFO "%s: get gpio_value:200 = %x\n",
-				__func__, gpio_get_value(200));
-	/* detect deskdock.
-	fsa_detect_dev(instance);
-	*/
+	printk(KERN_INFO "%s\n", __func__);
+	
 #if defined(FSA_DELAYED_WORK)
 	schedule_delayed_work(&instance->notifier_queue, FSA880_DELAY);
 	printk(KERN_INFO "scheduled_delayed_work called, %s, Line no:%d\n", __func__, __LINE__);
@@ -940,9 +809,10 @@ static int init_driver_instance(struct FSA9480_instance *instance, struct i2c_cl
 	instance->reboot_notifier.notifier_call = reboot_pending;
 	register_reboot_notifier(&instance->reboot_notifier);
 
-	 /* detect model of switch */
+	/* Read Device ID register of MUIC */
 	read_FSA9480_register(instance, FSA9490_DEVICE_ID_REGISTER, &c);
-	vendor = c & 0x7;
+	vendor = c & VENDOR_ID_MASK;
+	
 	instance->current_switch = client->dev.platform_data;
 	instance->name = instance->current_switch->name;
 #if defined(FSA_DELAYED_WORK)
@@ -952,15 +822,10 @@ static int init_driver_instance(struct FSA9480_instance *instance, struct i2c_cl
 #endif
 	instance->proc_entry = create_proc_read_entry("MUSB", 0444, NULL, FSA9480_readproc, instance);
 
-	/*detect if control register is default*/
+	/* Read Control register of MUIC */
 	read_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, &c);
-	printk(KERN_INFO "FSA USB Switch control register is 0x%02x bootmode is %d\n", c, sec_bootmode);
-
-	// Clear Interrupt Register1,2
-//	read_FSA9480_register(instance, FSA9490_INTERRUPT_1_REGISTER, &c);
-//	if (instance->current_switch->valid_registers[FSA9490_INTERRUPT_2_REGISTER])
-//		read_FSA9480_register(instance, FSA9490_INTERRUPT_2_REGISTER, &c);
-
+	printk(KERN_INFO "microUSB switch IC's Control register : 0x%02x, bootmode : %d\n", c, sec_bootmode);
+ 
 	gpio_request(instance->current_switch->connection_changed_interrupt_gpio, instance->current_switch->name);
 	nmk_gpio_set_pull(instance->current_switch->connection_changed_interrupt_gpio, NMK_GPIO_PULL_UP);
 	gpio_direction_input(instance->current_switch->connection_changed_interrupt_gpio);
@@ -971,19 +836,25 @@ static int init_driver_instance(struct FSA9480_instance *instance, struct i2c_cl
 		else
 			instance->charge_detect_gpio = instance->current_switch->charger_detect_gpio;
 	}
+	/* Unmask Attach/Detach Interrupt */
 	write_FSA9480_register(instance, FSA9490_INTERRUPT_MASK_1_REGISTER, 0x00);
+	/* Mask AV_Charging, Reserved_Attach, ADC_Change, Connect Interrupt */
 	write_FSA9480_register(instance, FSA9490_INTERRUPT_MASK_2_REGISTER, 0x27);
 
 //	read_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, &c);	/*If control register has interrupt enabled*/
 //	c &= (~FSA9490_INTERRUPT_ENABLE_BIT);				/* then we have just rebooted*/
 //	write_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, c);	/* compared to the Fairchild	*/
+	/* Unmask Interrupt */
 	write_FSA9480_register(instance, FSA9490_CONTROL_REGISTER, 0x1E);
 
 	instance->connection_change_gpio = instance->current_switch->connection_changed_interrupt_gpio;
 	instance->irq_bit = gpio_to_irq(instance->current_switch->connection_changed_interrupt_gpio);
-	instance->prev_event = instance->last_event = current_connection_mask(instance);
-	printk(KERN_INFO "FSA initial event = 0x%08lx\n", instance->last_event);
 
+	/* Find the inserted accessory before probing */
+	instance->prev_event = instance->last_event = current_connection_mask(instance);
+	printk(KERN_INFO "MUIC Initial Event = 0x%08lx\n", instance->last_event);
+
+	/* /sys/class/usb_switch/FSA_SWITCH/* */
 	instance->dev = device_create(usb_switch_class, NULL, 0, instance, "%s", "FSA_SWITCH");
 	for (i = 0; i < ARRAY_SIZE(FSA9480_device_attrs); i++) {
 			ret = device_create_file(instance->dev, &FSA9480_device_attrs[i]);
@@ -995,17 +866,21 @@ static int init_driver_instance(struct FSA9480_instance *instance, struct i2c_cl
 	if (IS_ERR(micro_usb_switch)) {
 		printk(KERN_ERR "Failed to create device(sec_switch)!\n");
 	}
-
+	/* /sys/class/sec/switch/usb_state */
 	if (device_create_file(micro_usb_switch, &dev_attr_usb_state) < 0)
 		printk(KERN_ERR "Failed to create device file(%s)!\n",
 				dev_attr_usb_state.attr.name);
+	/* /sys/class/sec/switch/adc */
+	if (device_create_file(micro_usb_switch, &dev_attr_adc) < 0)
+			printk(KERN_ERR "Failed to create device file(%s)!\n",
+					dev_attr_adc.attr.name);
 
-	blocking_notifier_call_chain(&usb_switch_notifier, USB_SWITCH_DRIVER_STARTED|instance->last_event, NULL);
+	blocking_notifier_call_chain(&usb_switch_notifier, USB_SWITCH_DRIVER_STARTED | instance->last_event, NULL);
 	instance->started = 1;
 
 	switch_dock_init();
-	gpio_request(200, NULL);
 	i2c_set_clientdata(client, instance);
+	
 #if defined(FSA_DELAYED_WORK)
 	ret = request_threaded_irq(instance->irq_bit, NULL, FSA9480_irq_thread_fn,
 			IRQF_TRIGGER_FALLING | IRQF_NO_SUSPEND | IRQF_ONESHOT,
@@ -1015,9 +890,13 @@ static int init_driver_instance(struct FSA9480_instance *instance, struct i2c_cl
 			IRQF_NO_SUSPEND | IRQF_SHARED,
 			instance->current_switch->name, instance);
 #endif
-
 	if (ret < 0)
 		printk(KERN_INFO "Failed to request IRQ %d (err: %d).\n", instance->irq_bit, ret);
+
+	/* Enable IRQ PM wake-up */
+	ret = enable_irq_wake(instance->irq_bit);
+	if (ret < 0)
+		dev_err(instance->dev, "failed to enable wakeup src %d\n", ret);
 
 	return 0 ;
 }

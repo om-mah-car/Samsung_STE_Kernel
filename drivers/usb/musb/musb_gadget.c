@@ -5,7 +5,6 @@
  * Copyright (C) 2005-2006 by Texas Instruments
  * Copyright (C) 2006-2007 Nokia Corporation
  * Copyright (C) 2009 MontaVista Software, Inc. <source@mvista.com>
- * Copyright (C) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -1124,7 +1123,11 @@ static int musb_gadget_enable(struct usb_ep *ep,
 		/* Set TXMAXP with the FIFO size of the endpoint
 		 * to disable double buffering mode.
 		 */
-		musb_writew(regs, MUSB_TXMAXP, musb_ep->packet_sz | (musb_ep->hb_mult << 11));
+		if (musb->double_buffer_not_ok)
+			musb_writew(regs, MUSB_TXMAXP, hw_ep->max_packet_sz_tx);
+		else
+			musb_writew(regs, MUSB_TXMAXP, musb_ep->packet_sz
+					| (musb_ep->hb_mult << 11));
 
 		csr = MUSB_TXCSR_MODE | MUSB_TXCSR_CLRDATATOG;
 		if (musb_readw(regs, MUSB_TXCSR)
@@ -1160,7 +1163,11 @@ static int musb_gadget_enable(struct usb_ep *ep,
 		/* Set RXMAXP with the FIFO size of the endpoint
 		 * to disable double buffering mode.
 		 */
-		musb_writew(regs, MUSB_RXMAXP, musb_ep->packet_sz | (musb_ep->hb_mult << 11));
+		if (musb->double_buffer_not_ok)
+			musb_writew(regs, MUSB_RXMAXP, hw_ep->max_packet_sz_tx);
+		else
+			musb_writew(regs, MUSB_RXMAXP, musb_ep->packet_sz
+					| (musb_ep->hb_mult << 11));
 
 		/* force shared fifo to OUT-only mode */
 		if (hw_ep->is_shared_fifo) {
@@ -1354,7 +1361,7 @@ static int musb_gadget_queue(struct usb_ep *ep, struct usb_request *req,
 	spin_lock_irqsave(&musb->lock, lockflags);
 
 	/* don't queue if the ep is down */
-	if (!musb_ep || !musb_ep->desc) {
+	if (!musb_ep->desc) {
 		dev_dbg(musb->controller, "req %p queued to %s while ep %s\n",
 				req, ep->name, "disabled");
 		status = -ESHUTDOWN;
@@ -2221,9 +2228,15 @@ void musb_g_disconnect(struct musb *musb)
 	 * OTG 2.0 Compliance
 	 * In host mode, do not do a gadget_disconnect
 	 */
-	if (is_host_enabled(musb) && !is_otg_enabled(musb))
+	if (is_host_enabled(musb))
 		return; /* fail safe */
 #endif
+
+	if(musb->is_disconnected)
+		return;
+	else
+		musb->is_disconnected = 1;
+
 	/* clear HR */
 	musb_writeb(mregs, MUSB_DEVCTL, devctl & MUSB_DEVCTL_SESSION);
 
@@ -2296,6 +2309,7 @@ __acquires(musb->lock)
 
 	/* start in USB_STATE_DEFAULT */
 	musb->is_active = 1;
+	musb->is_disconnected = 0;
 	musb->is_suspended = 0;
 	MUSB_DEV_MODE(musb);
 	musb->address = 0;

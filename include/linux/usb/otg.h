@@ -111,8 +111,7 @@ struct otg_transceiver {
 				int suspend);
 
 	/* for B devices only:  start session with A-Host */
-	int	(*start_srp)(struct otg_transceiver *otg,
-				unsigned mA);
+	int	(*start_srp)(struct otg_transceiver *otg);
 
 	/* start or continue HNP role switch */
 	int	(*start_hnp)(struct otg_transceiver *otg);
@@ -238,9 +237,9 @@ otg_set_suspend(struct otg_transceiver *otg, int suspend)
 }
 
 static inline int
-otg_start_srp(struct otg_transceiver *otg, unsigned mA)
+otg_start_srp(struct otg_transceiver *otg)
 {
-	return otg->start_srp(otg, mA);
+	return otg->start_srp(otg);
 }
 
 /* notifiers */
