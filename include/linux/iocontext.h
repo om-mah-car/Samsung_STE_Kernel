@@ -10,10 +10,7 @@ struct cfq_io_context {
 
 	void *cfqq[2];
 
-	struct io_context *ioc;
-	
-	unsigned int raising_time_left;
-	unsigned int saved_idle_window;
+	struct io_context *ioc;	
 
 	unsigned long last_end_request;
 
