@@ -11,6 +11,9 @@ struct cfq_io_context {
 	void *cfqq[2];
 
 	struct io_context *ioc;
+	
+	unsigned int raising_time_left;
+	unsigned int saved_idle_window;
 
 	unsigned long last_end_request;
 
@@ -32,6 +35,16 @@ struct cfq_io_context {
 	void (*exit)(struct io_context *); /* called on task exit */
 
 	struct rcu_head rcu_head;
+};
+
+/*
+ * Indexes into the ioprio_changed bitmap.  A bit set indicates that
+ * the corresponding I/O scheduler needs to see a ioprio update.
+ */
+enum {
+	IOC_CFQ_IOPRIO_CHANGED,
+	IOC_BFQ_IOPRIO_CHANGED,
+	IOC_IOPRIO_CHANGED_BITS
 };
 
 /*
