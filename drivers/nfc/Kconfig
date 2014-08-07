@@ -39,4 +39,4 @@ config PN547_NFC
 	  To compile this driver as a module, choose m here. The module will
 	  be called pn547.
 
-endif # NFC_DEVICES
+endmenu
