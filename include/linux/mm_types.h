@@ -49,38 +49,64 @@ struct page {
 					 * see PAGE_MAPPING_ANON below.
 					 */
 	/* Second double word */
-	union {
-		struct {
+	struct {
+		union {
 			pgoff_t index;		/* Our offset within mapping. */
-			atomic_t _mapcount;	/* Count of ptes mapped in mms,
-							 * to show when page is mapped
-							 * & limit reverse map searches.
-							 */
-			atomic_t _count;		/* Usage count, see below. */
+			void *freelist;		/* slub first free object */
 		};
 
-		struct {			/* SLUB cmpxchg_double area */
-			void *freelist;
-			union {
-				unsigned long counters;
-				struct {
-					unsigned inuse:16;
-					unsigned objects:15;
-					unsigned frozen:1;
+		union {
+			/* Used for cmpxchg_double in slub */
+			unsigned long counters;
+
+			struct {
+
+				union {
 					/*
-					 * Kernel may make use of this field even when slub
-					 * uses the rest of the double word!
- 					 */
-//					atomic_t _count;
+					 * Count of ptes mapped in
+					 * mms, to show when page is
+					 * mapped & limit reverse map
+					 * searches.
+					 *
+					 * Used also for tail pages
+					 * refcounting instead of
+					 * _count. Tail pages cannot
+					 * be mapped and keeping the
+					 * tail page _count zero at
+					 * all times guarantees
+					 * get_page_unless_zero() will
+					 * never succeed on tail
+					 * pages.
+					 */
+					atomic_t _mapcount;
+
+					struct {
+						unsigned inuse:16;
+						unsigned objects:15;
+						unsigned frozen:1;
+					};
 				};
+				atomic_t _count;		/* Usage count, see below. */
 			};
 		};
 	};
 
 	/* Third double word block */
-	struct list_head lru;		/* Pageout list, eg. active_list
+	union {
+		struct list_head lru;	/* Pageout list, eg. active_list
 					 * protected by zone->lru_lock !
 					 */
+		struct {		/* slub per cpu partial pages */
+			struct page *next;	/* Next partial slab */
+#ifdef CONFIG_64BIT
+			int pages;	/* Nr of partial slabs left */
+			int pobjects;	/* Approximate # of objects */
+#else
+			short int pages;
+			short int pobjects;
+#endif
+		};
+	};
 
 	/* Remainder is not double word aligned */
 	union {
