@@ -176,11 +176,19 @@ const char *kernel_get_module_path(const char *module)
 #ifdef DWARF_SUPPORT
 static int open_vmlinux(const char *module)
 {
-	const char *path = kernel_get_module_path(module);
-	if (!path) {
-		pr_err("Failed to find path of %s module.\n",
-		       module ?: "kernel");
-		return -ENOENT;
+	const char *path;
+
+	/* A file path -- this is an offline module */
+	if (module && strchr(module, '/'))
+		path = module;
+	else {
+		path = kernel_get_module_path(module);
+
+		if (!path) {
+			pr_err("Failed to find path of %s module.\n",
+			       module ?: "kernel");
+			return NULL;
+		}
 	}
 	pr_debug("Try to open %s\n", path);
 	return open(path, O_RDONLY);
@@ -216,6 +224,41 @@ static int kprobe_convert_to_perf_probe(struct probe_trace_point *tp,
 	pp->retprobe = tp->retprobe;
 
 	return 0;
+}
+
+static int add_module_to_probe_trace_events(struct probe_trace_event *tevs,
+					    int ntevs, const char *module)
+{
+	int i, ret = 0;
+	char *tmp;
+
+	if (!module)
+		return 0;
+
+	tmp = strrchr(module, '/');
+	if (tmp) {
+		/* This is a module path -- get the module name */
+		module = strdup(tmp + 1);
+		if (!module)
+			return -ENOMEM;
+		tmp = strchr(module, '.');
+		if (tmp)
+			*tmp = '\0';
+		tmp = (char *)module;	/* For free() */
+	}
+
+ 	for (i = 0; i < ntevs; i++) {
+ 		tevs[i].point.module = strdup(module);
+		if (!tevs[i].point.module) {
+			ret = -ENOMEM;
+			break;
+		}
+ 	}
+
+	if (tmp)
+		free(tmp);
+
+	return ret;
 }
 
 /* Try to find perf_probe_event with debuginfo */
