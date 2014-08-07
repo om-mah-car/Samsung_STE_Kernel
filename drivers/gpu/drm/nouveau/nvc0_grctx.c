@@ -1559,8 +1559,15 @@ nvc0_grctx_generate_unk47xx(struct drm_device *dev)
 static void
 nvc0_grctx_generate_shaders(struct drm_device *dev)
 {
-	nv_wr32(dev, 0x405800, 0x078000bf);
-	nv_wr32(dev, 0x405830, 0x02180000);
+	struct drm_nouveau_private *dev_priv = dev->dev_private;
+
+	if (dev_priv->chipset != 0xc1) {
+		nv_wr32(dev, 0x405800, 0x078000bf);
+		nv_wr32(dev, 0x405830, 0x02180000);
+	} else {
+		nv_wr32(dev, 0x405800, 0x0f8000bf);
+		nv_wr32(dev, 0x405830, 0x02180218);
+	}
 	nv_wr32(dev, 0x405834, 0x00000000);
 	nv_wr32(dev, 0x405838, 0x00000000);
 	nv_wr32(dev, 0x405854, 0x00000000);
@@ -1586,10 +1593,16 @@ nvc0_grctx_generate_unk60xx(struct drm_device *dev)
 static void
 nvc0_grctx_generate_unk64xx(struct drm_device *dev)
 {
+	struct drm_nouveau_private *dev_priv = dev->dev_private;
+
 	nv_wr32(dev, 0x4064a8, 0x00000000);
 	nv_wr32(dev, 0x4064ac, 0x00003fff);
 	nv_wr32(dev, 0x4064b4, 0x00000000);
 	nv_wr32(dev, 0x4064b8, 0x00000000);
+	if (dev_priv->chipset == 0xc1) {
+		nv_wr32(dev, 0x4064c0, 0x80140078);
+		nv_wr32(dev, 0x4064c4, 0x0086ffff);
+	}
 }
 
 static void
@@ -1622,11 +1635,12 @@ static void
 nvc0_grctx_generate_rop(struct drm_device *dev)
 {
 	struct drm_nouveau_private *dev_priv = dev->dev_private;
+	int chipset = dev_priv->chipset;
 
 	/* ROPC_BROADCAST */
 	nv_wr32(dev, 0x408800, 0x02802a3c);
 	nv_wr32(dev, 0x408804, 0x00000040);
-	nv_wr32(dev, 0x408808, 0x0003e00d);
+	nv_wr32(dev, 0x408808, chipset != 0xc1 ? 0x0003e00d : 0x1003e005);
 	switch (dev_priv->chipset) {
 	case 0xc0:
 		nv_wr32(dev, 0x408900, 0x0080b801);
@@ -1636,7 +1650,7 @@ nvc0_grctx_generate_rop(struct drm_device *dev)
 		nv_wr32(dev, 0x408900, 0x3080b801);
 		break;
 	}
-	nv_wr32(dev, 0x408904, 0x02000001);
+	nv_wr32(dev, 0x408904, chipset != 0xc1 ? 0x02000001 : 0x62000001);
 	nv_wr32(dev, 0x408908, 0x00c80929);
 	nv_wr32(dev, 0x40890c, 0x00000000);
 	nv_wr32(dev, 0x408980, 0x0000011d);
@@ -1645,6 +1659,8 @@ nvc0_grctx_generate_rop(struct drm_device *dev)
 static void
 nvc0_grctx_generate_gpc(struct drm_device *dev)
 {
+	struct drm_nouveau_private *dev_priv = dev->dev_private;
+	int chipset = dev_priv->chipset;
 	int i;
 
 	/* GPC_BROADCAST */
@@ -1676,7 +1692,7 @@ nvc0_grctx_generate_gpc(struct drm_device *dev)
 	nv_wr32(dev, 0x41880c, 0x00000000);
 	nv_wr32(dev, 0x418810, 0x00000000);
 	nv_wr32(dev, 0x418828, 0x00008442);
-	nv_wr32(dev, 0x418830, 0x00000001);
+	nv_wr32(dev, 0x418830, chipset != 0xc1 ? 0x00000001 : 0x10000001);
 	nv_wr32(dev, 0x4188d8, 0x00000008);
 	nv_wr32(dev, 0x4188e0, 0x01000000);
 	nv_wr32(dev, 0x4188e8, 0x00000000);
@@ -1684,7 +1700,7 @@ nvc0_grctx_generate_gpc(struct drm_device *dev)
 	nv_wr32(dev, 0x4188f0, 0x00000000);
 	nv_wr32(dev, 0x4188f4, 0x00000000);
 	nv_wr32(dev, 0x4188f8, 0x00000000);
-	nv_wr32(dev, 0x4188fc, 0x00100000);
+	nv_wr32(dev, 0x4188fc, chipset != 0xc1 ? 0x00100000 : 0x00100018);
 	nv_wr32(dev, 0x41891c, 0x00ff00ff);
 	nv_wr32(dev, 0x418924, 0x00000000);
 	nv_wr32(dev, 0x418928, 0x00ffff00);
@@ -1715,6 +1731,8 @@ nvc0_grctx_generate_gpc(struct drm_device *dev)
 	nv_wr32(dev, 0x418c24, 0x00000000);
 	nv_wr32(dev, 0x418c28, 0x00000000);
 	nv_wr32(dev, 0x418c2c, 0x00000000);
+	if (chipset == 0xc1)
+		nv_wr32(dev, 0x418c6c, 0x00000001);
 	nv_wr32(dev, 0x418c80, 0x20200004);
 	nv_wr32(dev, 0x418c8c, 0x00000001);
 	nv_wr32(dev, 0x419000, 0x00000780);
@@ -1727,10 +1745,11 @@ static void
 nvc0_grctx_generate_tp(struct drm_device *dev)
 {
 	struct drm_nouveau_private *dev_priv = dev->dev_private;
+	int chipset = dev_priv->chipset;
 
 	/* GPC_BROADCAST.TP_BROADCAST */
 	nv_wr32(dev, 0x419848, 0x00000000);
-	nv_wr32(dev, 0x419864, 0x0000012a);
+	nv_wr32(dev, 0x419864, chipset != 0xc1 ? 0x0000012a : 0x00000129);
 	nv_wr32(dev, 0x419888, 0x00000000);
 	nv_wr32(dev, 0x419a00, 0x000001f0);
 	nv_wr32(dev, 0x419a04, 0x00000001);
@@ -1740,7 +1759,7 @@ nvc0_grctx_generate_tp(struct drm_device *dev)
 	nv_wr32(dev, 0x419a14, 0x00000200);
 	nv_wr32(dev, 0x419a1c, 0x00000000);
 	nv_wr32(dev, 0x419a20, 0x00000800);
-	if (dev_priv->chipset != 0xc0)
+	if (chipset != 0xc0 && chipset != 0xc8)
 		nv_wr32(dev, 0x00419ac4, 0x0007f440); /* 0xc3 */
 	nv_wr32(dev, 0x419b00, 0x0a418820);
 	nv_wr32(dev, 0x419b04, 0x062080e6);
@@ -1749,7 +1768,7 @@ nvc0_grctx_generate_tp(struct drm_device *dev)
 	nv_wr32(dev, 0x419b10, 0x0a418820);
 	nv_wr32(dev, 0x419b14, 0x000000e6);
 	nv_wr32(dev, 0x419bd0, 0x00900103);
-	nv_wr32(dev, 0x419be0, 0x00000001);
+	nv_wr32(dev, 0x419be0, chipset != 0xc1 ? 0x00000001 : 0x00400001);
 	nv_wr32(dev, 0x419be4, 0x00000000);
 	nv_wr32(dev, 0x419c00, 0x00000002);
 	nv_wr32(dev, 0x419c04, 0x00000006);
@@ -1758,8 +1777,10 @@ nvc0_grctx_generate_tp(struct drm_device *dev)
 	nv_wr32(dev, 0x419cbc, 0x28137606);
 	nv_wr32(dev, 0x419ce8, 0x00000000);
 	nv_wr32(dev, 0x419cf4, 0x00000183);
-	nv_wr32(dev, 0x419d20, 0x02180000);
+	nv_wr32(dev, 0x419d20, chipset != 0xc1 ? 0x02180000 : 0x12180000);
 	nv_wr32(dev, 0x419d24, 0x00001fff);
+	if (chipset == 0xc1)
+		nv_wr32(dev, 0x419d44, 0x02180218);
 	nv_wr32(dev, 0x419e04, 0x00000000);
 	nv_wr32(dev, 0x419e08, 0x00000000);
 	nv_wr32(dev, 0x419e0c, 0x00000000);
@@ -1785,11 +1806,11 @@ nvc0_grctx_generate_tp(struct drm_device *dev)
 	nv_wr32(dev, 0x419e8c, 0x00000000);
 	nv_wr32(dev, 0x419e90, 0x00000000);
 	nv_wr32(dev, 0x419e98, 0x00000000);
-	if (dev_priv->chipset != 0xc0)
+	if (chipset != 0xc0 && chipset != 0xc8)
 		nv_wr32(dev, 0x419ee0, 0x00011110);
 	nv_wr32(dev, 0x419f50, 0x00000000);
 	nv_wr32(dev, 0x419f54, 0x00000000);
-	if (dev_priv->chipset != 0xc0)
+	if (chipset != 0xc0 && chipset != 0xc8)
 		nv_wr32(dev, 0x419f58, 0x00000000);
 }
 
@@ -2633,6 +2654,8 @@ nvc0_grctx_generate(struct nouveau_channel *chan)
 	nv_icmd(dev, 0x0000053f, 0xffff0000);
 	nv_icmd(dev, 0x00000585, 0x0000003f);
 	nv_icmd(dev, 0x00000576, 0x00000003);
+	if (dev_priv->chipset == 0xc1)
+		nv_icmd(dev, 0x0000057b, 0x00000059);
 	nv_icmd(dev, 0x00000586, 0x00000040);
 	nv_icmd(dev, 0x00000582, 0x00000080);
 	nv_icmd(dev, 0x00000583, 0x00000080);
