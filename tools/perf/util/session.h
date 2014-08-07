@@ -172,4 +172,7 @@ void perf_session__print_symbols(union perf_event *event,
 				 struct perf_sample *sample,
 				 struct perf_session *session);
 
+int perf_session__cpu_bitmap(struct perf_session *session,
+			     const char *cpu_list, unsigned long *cpu_bitmap);
+
 #endif /* __PERF_SESSION_H */
