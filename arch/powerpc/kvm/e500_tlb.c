@@ -28,7 +28,195 @@
 
 #define to_htlb1_esel(esel) (tlb1_entry_num - (esel) - 1)
 
+struct id {
+	unsigned long val;
+	struct id **pentry;
+};
+
+#define NUM_TIDS 256
+
+/*
+ * This table provide mappings from:
+ * (guestAS,guestTID,guestPR) --> ID of physical cpu
+ * guestAS	[0..1]
+ * guestTID	[0..255]
+ * guestPR	[0..1]
+ * ID		[1..255]
+ * Each vcpu keeps one vcpu_id_table.
+ */
+struct vcpu_id_table {
+	struct id id[2][NUM_TIDS][2];
+};
+
+/*
+ * This table provide reversed mappings of vcpu_id_table:
+ * ID --> address of vcpu_id_table item.
+ * Each physical core has one pcpu_id_table.
+ */
+struct pcpu_id_table {
+	struct id *entry[NUM_TIDS];
+};
+
+static DEFINE_PER_CPU(struct pcpu_id_table, pcpu_sids);
+
+/* This variable keeps last used shadow ID on local core.
+ * The valid range of shadow ID is [1..255] */
+static DEFINE_PER_CPU(unsigned long, pcpu_last_used_sid);
+
 static unsigned int tlb1_entry_num;
+
+/*
+ * Allocate a free shadow id and setup a valid sid mapping in given entry.
+ * A mapping is only valid when vcpu_id_table and pcpu_id_table are match.
+ *
+ * The caller must have preemption disabled, and keep it that way until
+ * it has finished with the returned shadow id (either written into the
+ * TLB or arch.shadow_pid, or discarded).
+ */
+static inline int local_sid_setup_one(struct id *entry)
+{
+	unsigned long sid;
+	int ret = -1;
+
+	sid = ++(__get_cpu_var(pcpu_last_used_sid));
+	if (sid < NUM_TIDS) {
+		__get_cpu_var(pcpu_sids).entry[sid] = entry;
+		entry->val = sid;
+		entry->pentry = &__get_cpu_var(pcpu_sids).entry[sid];
+		ret = sid;
+	}
+
+	/*
+	 * If sid == NUM_TIDS, we've run out of sids.  We return -1, and
+	 * the caller will invalidate everything and start over.
+	 *
+	 * sid > NUM_TIDS indicates a race, which we disable preemption to
+	 * avoid.
+	 */
+	WARN_ON(sid > NUM_TIDS);
+
+	return ret;
+}
+
+/*
+ * Check if given entry contain a valid shadow id mapping.
+ * An ID mapping is considered valid only if
+ * both vcpu and pcpu know this mapping.
+ *
+ * The caller must have preemption disabled, and keep it that way until
+ * it has finished with the returned shadow id (either written into the
+ * TLB or arch.shadow_pid, or discarded).
+ */
+static inline int local_sid_lookup(struct id *entry)
+{
+	if (entry && entry->val != 0 &&
+	    __get_cpu_var(pcpu_sids).entry[entry->val] == entry &&
+	    entry->pentry == &__get_cpu_var(pcpu_sids).entry[entry->val])
+		return entry->val;
+	return -1;
+}
+
+/* Invalidate all id mappings on local core */
+static inline void local_sid_destroy_all(void)
+{
+	preempt_disable();
+	__get_cpu_var(pcpu_last_used_sid) = 0;
+	memset(&__get_cpu_var(pcpu_sids), 0, sizeof(__get_cpu_var(pcpu_sids)));
+	preempt_enable();
+}
+
+static void *kvmppc_e500_id_table_alloc(struct kvmppc_vcpu_e500 *vcpu_e500)
+{
+	vcpu_e500->idt = kzalloc(sizeof(struct vcpu_id_table), GFP_KERNEL);
+	return vcpu_e500->idt;
+}
+
+static void kvmppc_e500_id_table_free(struct kvmppc_vcpu_e500 *vcpu_e500)
+{
+	kfree(vcpu_e500->idt);
+}
+
+/* Invalidate all mappings on vcpu */
+static void kvmppc_e500_id_table_reset_all(struct kvmppc_vcpu_e500 *vcpu_e500)
+{
+	memset(vcpu_e500->idt, 0, sizeof(struct vcpu_id_table));
+
+	/* Update shadow pid when mappings are changed */
+	kvmppc_e500_recalc_shadow_pid(vcpu_e500);
+}
+
+/* Invalidate one ID mapping on vcpu */
+static inline void kvmppc_e500_id_table_reset_one(
+			       struct kvmppc_vcpu_e500 *vcpu_e500,
+			       int as, int pid, int pr)
+{
+	struct vcpu_id_table *idt = vcpu_e500->idt;
+
+	BUG_ON(as >= 2);
+	BUG_ON(pid >= NUM_TIDS);
+	BUG_ON(pr >= 2);
+
+	idt->id[as][pid][pr].val = 0;
+	idt->id[as][pid][pr].pentry = NULL;
+
+	/* Update shadow pid when mappings are changed */
+	kvmppc_e500_recalc_shadow_pid(vcpu_e500);
+}
+
+/*
+ * Map guest (vcpu,AS,ID,PR) to physical core shadow id.
+ * This function first lookup if a valid mapping exists,
+ * if not, then creates a new one.
+ *
+ * The caller must have preemption disabled, and keep it that way until
+ * it has finished with the returned shadow id (either written into the
+ * TLB or arch.shadow_pid, or discarded).
+ */
+static unsigned int kvmppc_e500_get_sid(struct kvmppc_vcpu_e500 *vcpu_e500,
+					unsigned int as, unsigned int gid,
+					unsigned int pr, int avoid_recursion)
+{
+	struct vcpu_id_table *idt = vcpu_e500->idt;
+	int sid;
+
+	BUG_ON(as >= 2);
+	BUG_ON(gid >= NUM_TIDS);
+	BUG_ON(pr >= 2);
+
+	sid = local_sid_lookup(&idt->id[as][gid][pr]);
+
+	while (sid <= 0) {
+		/* No mapping yet */
+		sid = local_sid_setup_one(&idt->id[as][gid][pr]);
+		if (sid <= 0) {
+			_tlbil_all();
+			local_sid_destroy_all();
+		}
+
+		/* Update shadow pid when mappings are changed */
+		if (!avoid_recursion)
+			kvmppc_e500_recalc_shadow_pid(vcpu_e500);
+	}
+
+	return sid;
+}
+
+/* Map guest pid to shadow.
+ * We use PID to keep shadow of current guest non-zero PID,
+ * and use PID1 to keep shadow of guest zero PID.
+ * So that guest tlbe with TID=0 can be accessed at any time */
+void kvmppc_e500_recalc_shadow_pid(struct kvmppc_vcpu_e500 *vcpu_e500)
+{
+	preempt_disable();
+	vcpu_e500->vcpu.arch.shadow_pid = kvmppc_e500_get_sid(vcpu_e500,
+			get_cur_as(&vcpu_e500->vcpu),
+			get_cur_pid(&vcpu_e500->vcpu),
+			get_cur_pr(&vcpu_e500->vcpu), 1);
+	vcpu_e500->vcpu.arch.shadow_pid1 = kvmppc_e500_get_sid(vcpu_e500,
+			get_cur_as(&vcpu_e500->vcpu), 0,
+			get_cur_pr(&vcpu_e500->vcpu), 1);
+	preempt_enable();
+}
 
 void kvmppc_dump_tlbs(struct kvm_vcpu *vcpu)
 {
@@ -407,7 +595,8 @@ int kvmppc_e500_emul_mt_mmucsr0(struct kvmppc_vcpu_e500 *vcpu_e500, ulong value)
 		for (esel = 0; esel < vcpu_e500->guest_tlb_size[1]; esel++)
 			kvmppc_e500_gtlbe_invalidate(vcpu_e500, 1, esel);
 
-	_tlbil_all();
+	/* Invalidate all vcpu id mappings */
+	kvmppc_e500_id_table_reset_all(vcpu_e500);
 
 	return EMULATE_DONE;
 }
@@ -438,7 +627,8 @@ int kvmppc_e500_emul_tlbivax(struct kvm_vcpu *vcpu, int ra, int rb)
 			kvmppc_e500_gtlbe_invalidate(vcpu_e500, tlbsel, esel);
 	}
 
-	_tlbil_all();
+	/* Invalidate all vcpu id mappings */
+	kvmppc_e500_id_table_reset_all(vcpu_e500);
 
 	return EMULATE_DONE;
 }
@@ -637,6 +827,7 @@ void kvmppc_mmu_map(struct kvm_vcpu *vcpu, u64 eaddr, gpa_t gpaddr,
 	int esel = esel_of(index);
 	int stlbsel, sesel;
 
+	preempt_disable();
 	switch (tlbsel) {
 	case 0:
 		stlbsel = 0;
@@ -679,8 +870,10 @@ void kvmppc_set_pid(struct kvm_vcpu *vcpu, u32 pid)
 {
 	struct kvmppc_vcpu_e500 *vcpu_e500 = to_e500(vcpu);
 
-	vcpu_e500->pid[0] = vcpu->arch.shadow_pid =
-		vcpu->arch.pid = pid;
+	if (vcpu->arch.pid != pid) {
+		vcpu_e500->pid[0] = vcpu->arch.pid = pid;
+		kvmppc_e500_recalc_shadow_pid(vcpu_e500);
+	}
 }
 
 void kvmppc_e500_tlb_setup(struct kvmppc_vcpu_e500 *vcpu_e500)
@@ -739,6 +932,9 @@ int kvmppc_e500_tlb_init(struct kvmppc_vcpu_e500 *vcpu_e500)
 		kzalloc(sizeof(struct page *) * tlb1_entry_num, GFP_KERNEL);
 	if (vcpu_e500->shadow_pages[1] == NULL)
 		goto err_out_page0;
+
+	if (kvmppc_e500_id_table_alloc(vcpu_e500) == NULL)
+		goto err_out_priv1;
 
 	/* Init TLB configuration register */
 	vcpu_e500->tlb0cfg = mfspr(SPRN_TLB0CFG) & ~0xfffUL;

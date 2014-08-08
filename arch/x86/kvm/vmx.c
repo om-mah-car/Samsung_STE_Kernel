@@ -2720,6 +2720,17 @@ static void vmx_disable_intercept_for_msr(u32 msr, bool longmode_only)
 	__vmx_disable_intercept_for_msr(vmx_msr_bitmap_longmode, msr);
 }
 
+static void ept_set_mmio_spte_mask(void)
+{
+	/*
+	 * EPT Misconfigurations can be generated if the value of bits 2:0
+	 * of an EPT paging-structure entry is 110b (write/execute).
+	 * Also, magic bits (0xffull << 49) is set to quickly identify mmio
+	 * spte.
+	 */
+	kvm_mmu_set_mmio_spte_mask(0xffull << 49 | 0x6ull);
+}
+
 /*
  * Sets up the vmcs for emulated real mode.
  */
@@ -3777,11 +3788,19 @@ static void ept_misconfig_inspect_spte(struct kvm_vcpu *vcpu, u64 spte,
 static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 {
 	u64 sptes[4];
-	int nr_sptes, i;
+	int nr_sptes, i, ret;
 	gpa_t gpa;
 
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 
+	ret = handle_mmio_page_fault_common(vcpu, gpa, true);
+	if (likely(ret == 1))
+		return x86_emulate_instruction(vcpu, gpa, 0, NULL, 0) ==
+					      EMULATE_DONE;
+	if (unlikely(!ret))
+		return 1;
+
+	/* It is the real ept misconfig */
 	printk(KERN_ERR "EPT: Misconfiguration.\n");
 	printk(KERN_ERR "EPT: GPA: 0x%llx\n", gpa);
 
@@ -4679,6 +4698,7 @@ static int __init vmx_init(void)
 		bypass_guest_pf = 0;
 		kvm_mmu_set_mask_ptes(0ull, 0ull, 0ull, 0ull,
 				VMX_EPT_EXECUTABLE_MASK);
+		ept_set_mmio_spte_mask();
 		kvm_enable_tdp();
 	} else
 		kvm_disable_tdp();

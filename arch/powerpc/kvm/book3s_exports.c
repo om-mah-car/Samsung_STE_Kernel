@@ -30,3 +30,5 @@ EXPORT_SYMBOL_GPL(kvmppc_load_up_altivec);
 #ifdef CONFIG_VSX
 EXPORT_SYMBOL_GPL(kvmppc_load_up_vsx);
 #endif
+#endif
+

@@ -376,7 +376,11 @@ slb_miss_user_pseries:
 /* KVM's trampoline code needs to be close to the interrupt handlers */
 
 #ifdef CONFIG_KVM_BOOK3S_64_HANDLER
+#ifdef CONFIG_KVM_BOOK3S_PR
 #include "../kvm/book3s_rmhandlers.S"
+#else
+#include "../kvm/book3s_hv_rmhandlers.S"
+#endif
 #endif
 
 	.align	7

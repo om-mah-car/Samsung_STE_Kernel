@@ -127,6 +127,9 @@ obj-$(CONFIG_TEE_SUPPORT)	+= tee/
 obj-$(CONFIG_MODEM)		+= modem/
 
 obj-$(CONFIG_HWSPINLOCK)	+= hwspinlock/
+
+# Virtualization drivers
+obj-$(CONFIG_VIRT_DRIVERS)	+= virt/
 obj-y				+= samsung/
 obj-$(CONFIG_SAMSUNG_PHONE_SVNET)	+= phone_svn/
 obj-$(CONFIG_AUTHENTEC_VPNCLIENT_INTERCEPTOR) += interceptor/

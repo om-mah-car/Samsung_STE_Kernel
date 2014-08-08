@@ -33,7 +33,9 @@
 /* memory slots that does not exposed to userspace */
 #define KVM_PRIVATE_MEM_SLOTS 4
 
+#ifdef CONFIG_KVM_MMIO
 #define KVM_COALESCED_MMIO_PAGE_OFFSET 1
+#endif
 
 /* We don't currently support large pages. */
 #define KVM_HPAGE_GFN_SHIFT(x)	0
@@ -133,7 +135,26 @@ struct kvmppc_exit_timing {
 	};
 };
 
+struct kvmppc_pginfo {
+	unsigned long pfn;
+	atomic_t refcnt;
+};
+
 struct kvm_arch {
+#ifdef CONFIG_KVM_BOOK3S_64_HV
+	unsigned long hpt_virt;
+	unsigned long ram_npages;
+	unsigned long ram_psize;
+	unsigned long ram_porder;
+	struct kvmppc_pginfo *ram_pginfo;
+	unsigned int lpid;
+	unsigned int host_lpid;
+	unsigned long host_lpcr;
+	unsigned long sdr1;
+	unsigned long host_sdr1;
+	int tlbie_lock;
+	unsigned short last_vcpu[NR_CPUS];
+#endif /* CONFIG_KVM_BOOK3S_64_HV */
 };
 
 struct kvmppc_pte {
@@ -201,7 +222,7 @@ struct kvm_vcpu_arch {
 #endif
 
 #ifdef CONFIG_VSX
-	u64 vsr[32];
+	u64 vsr[64];
 #endif
 
 #ifdef CONFIG_PPC_BOOK3S
@@ -249,6 +270,7 @@ struct kvm_vcpu_arch {
 	u32 pvr;
 
 	u32 shadow_pid;
+	u32 shadow_pid1;
 	u32 pid;
 	u32 swap_pid;
 
@@ -257,6 +279,9 @@ struct kvm_vcpu_arch {
 	u32 dbcr0;
 	u32 dbcr1;
 	u32 dbsr;
+
+	u64 mmcr[3];
+	u32 pmc[8];
 
 #ifdef CONFIG_KVM_EXIT_TIMING
 	struct mutex exit_timing_lock;
@@ -272,8 +297,12 @@ struct kvm_vcpu_arch {
 	struct dentry *debugfs_exit_timing;
 #endif
 
+#ifdef CONFIG_PPC_BOOK3S
+	ulong fault_dar;
+	u32 fault_dsisr;
+#endif
+
 #ifdef CONFIG_BOOKE
-	u32 last_inst;
 	ulong fault_dear;
 	ulong fault_esr;
 	ulong queued_dear;

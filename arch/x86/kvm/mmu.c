@@ -181,7 +181,14 @@ struct kvm_shadow_walk_iterator {
 	for (shadow_walk_init(&(_walker), _vcpu, _addr);	\
 	     shadow_walk_okay(&(_walker));			\
 	     shadow_walk_next(&(_walker)))
+	     
+#define for_each_shadow_entry_lockless(_vcpu, _addr, _walker, spte)	\
+	for (shadow_walk_init(&(_walker), _vcpu, _addr);		\
+	     shadow_walk_okay(&(_walker)) &&				\
+		({ spte = mmu_spte_get_lockless(_walker.sptep); 1; });	\
+	     __shadow_walk_next(&(_walker), spte))
 
+	     
 typedef void (*mmu_parent_walk_fn) (struct kvm_mmu_page *sp, u64 *spte);
 
 static struct kmem_cache *pte_chain_cache;
@@ -196,6 +203,47 @@ static u64 __read_mostly shadow_x_mask;	/* mutual exclusive with nx_mask */
 static u64 __read_mostly shadow_user_mask;
 static u64 __read_mostly shadow_accessed_mask;
 static u64 __read_mostly shadow_dirty_mask;
+static u64 __read_mostly shadow_mmio_mask;
+
+static void mmu_spte_set(u64 *sptep, u64 spte);
+
+void kvm_mmu_set_mmio_spte_mask(u64 mmio_mask)
+{
+	shadow_mmio_mask = mmio_mask;
+}
+EXPORT_SYMBOL_GPL(kvm_mmu_set_mmio_spte_mask);
+
+static void mark_mmio_spte(u64 *sptep, u64 gfn, unsigned access)
+{
+	access &= ACC_WRITE_MASK | ACC_USER_MASK;
+
+	mmu_spte_set(sptep, shadow_mmio_mask | access | gfn << PAGE_SHIFT);
+}
+
+static bool is_mmio_spte(u64 spte)
+{
+	return (spte & shadow_mmio_mask) == shadow_mmio_mask;
+}
+
+static gfn_t get_mmio_spte_gfn(u64 spte)
+{
+	return (spte & ~shadow_mmio_mask) >> PAGE_SHIFT;
+}
+
+static unsigned get_mmio_spte_access(u64 spte)
+{
+	return (spte & ~shadow_mmio_mask) & ~PAGE_MASK;
+}
+
+static bool set_mmio_spte(u64 *sptep, gfn_t gfn, pfn_t pfn, unsigned access)
+{
+	if (unlikely(is_noslot_pfn(pfn))) {
+		mark_mmio_spte(sptep, gfn, access);
+		return true;
+	}
+
+	return false;
+}
 
 static inline u64 rsvd_bits(int s, int e)
 {
@@ -282,6 +330,18 @@ static gfn_t pse36_gfn_delta(u32 gpte)
 	return (gpte & PT32_DIR_PSE36_MASK) << shift;
 }
 
+static void count_spte_clear(u64 *sptep, u64 spte)
+{
+	struct kvm_mmu_page *sp =  page_header(__pa(sptep));
+
+	if (is_shadow_present_pte(spte))
+		return;
+
+	/* Ensure the spte is completely set before we increase the count */
+	smp_wmb();
+	sp->clear_spte_count++;
+}
+
 static void __set_spte(u64 *sptep, u64 spte)
 {
 	set_64bit(sptep, spte);
@@ -300,6 +360,11 @@ static u64 __xchg_spte(u64 *sptep, u64 new_spte)
 
 	return old_spte;
 #endif
+}
+
+static u64 __get_spte_lockless(u64 *sptep)
+{
+	return ACCESS_ONCE(*sptep);
 }
 
 static bool spte_has_volatile_bits(u64 spte)
@@ -346,6 +411,28 @@ static void update_spte(u64 *sptep, u64 new_spte)
 		kvm_set_pfn_accessed(spte_to_pfn(old_spte));
 	if (spte_is_bit_cleared(old_spte, new_spte, shadow_dirty_mask))
 		kvm_set_pfn_dirty(spte_to_pfn(old_spte));
+}
+
+static u64 mmu_spte_get_lockless(u64 *sptep)
+{
+	return __get_spte_lockless(sptep);
+}
+
+static void walk_shadow_page_lockless_begin(struct kvm_vcpu *vcpu)
+{
+	rcu_read_lock();
+	atomic_inc(&vcpu->kvm->arch.reader_counter);
+
+	/* Increase the counter before walking shadow page table */
+	smp_mb__after_atomic_inc();
+}
+
+static void walk_shadow_page_lockless_end(struct kvm_vcpu *vcpu)
+{
+	/* Decrease the counter after walking shadow page table finished */
+	smp_mb__before_atomic_dec();
+	atomic_dec(&vcpu->kvm->arch.reader_counter);
+	rcu_read_unlock();
 }
 
 static int mmu_topup_memory_cache(struct kvm_mmu_memory_cache *cache,
@@ -1017,6 +1104,23 @@ static int is_empty_shadow_page(u64 *spt)
 			return 0;
 		}
 	return 1;
+}
+
+static bool __check_direct_spte_mmio_pf(u64 spte)
+{
+	union split_spte sspte = (union split_spte)spte;
+	u32 high_mmio_mask = shadow_mmio_mask >> 32;
+
+	/* It is valid if the spte is zapped. */
+	if (spte == 0ull)
+		return true;
+
+	/* It is valid if the spte is being zapped. */
+	if (sspte.spte_low == 0ull &&
+	    (sspte.spte_high & high_mmio_mask) == high_mmio_mask)
+		return true;
+
+	return false;
 }
 #endif
 
@@ -1744,6 +1848,30 @@ static int kvm_mmu_prepare_zap_page(struct kvm *kvm, struct kvm_mmu_page *sp,
 	return ret;
 }
 
+static void kvm_mmu_isolate_pages(struct list_head *invalid_list)
+{
+	struct kvm_mmu_page *sp;
+
+	list_for_each_entry(sp, invalid_list, link)
+		kvm_mmu_isolate_page(sp);
+}
+
+static void free_pages_rcu(struct rcu_head *head)
+{
+	struct kvm_mmu_page *next, *sp;
+
+	sp = container_of(head, struct kvm_mmu_page, rcu);
+	while (sp) {
+		if (!list_empty(&sp->link))
+			next = list_first_entry(&sp->link,
+				      struct kvm_mmu_page, link);
+		else
+			next = NULL;
+		kvm_mmu_free_page(sp);
+		sp = next;
+	}
+}
+
 static void kvm_mmu_commit_zap_page(struct kvm *kvm,
 				    struct list_head *invalid_list)
 {
@@ -1753,6 +1881,14 @@ static void kvm_mmu_commit_zap_page(struct kvm *kvm,
 		return;
 
 	kvm_flush_remote_tlbs(kvm);
+
+	if (atomic_read(&kvm->arch.reader_counter)) {
+		kvm_mmu_isolate_pages(invalid_list);
+		sp = list_first_entry(invalid_list, struct kvm_mmu_page, link);
+		list_del_init(invalid_list);
+		call_rcu(&sp->rcu, free_pages_rcu);
+		return;
+	}
 
 	do {
 		sp = list_first_entry(invalid_list, struct kvm_mmu_page, link);
@@ -2072,7 +2208,8 @@ static int set_spte(struct kvm_vcpu *vcpu, u64 *sptep,
 			if (is_writable_pte(spte))
 				spte &= ~PT_WRITABLE_MASK;
 		}
-	}
+	} else if (is_mmio_spte(pte))
+		mmu_spte_clear_no_track(spte);
 
 	if (pte_access & ACC_WRITE_MASK)
 		mark_page_dirty(vcpu->kvm, gfn);
@@ -2520,6 +2657,9 @@ static int mmu_alloc_shadow_roots(struct kvm_vcpu *vcpu)
 	if (mmu_check_root(vcpu, root_gfn))
 		return 1;
 
+	if (set_mmio_spte(sptep, gfn, pfn, pte_access))
+		return 0;
+
 	/*
 	 * Do we shadow a long mode page table? If so we need to
 	 * write-protect the guests page table root.
@@ -2667,6 +2807,92 @@ static gpa_t nonpaging_gva_to_gpa_nested(struct kvm_vcpu *vcpu, gva_t vaddr,
 	return vcpu->arch.nested_mmu.translate_gpa(vcpu, vaddr, access);
 }
 
+static bool quickly_check_mmio_pf(struct kvm_vcpu *vcpu, u64 addr, bool direct)
+{
+	if (direct)
+		return vcpu_match_mmio_gpa(vcpu, addr);
+
+	return vcpu_match_mmio_gva(vcpu, addr);
+}
+
+
+/*
+ * On direct hosts, the last spte is only allows two states
+ * for mmio page fault:
+ *   - It is the mmio spte
+ *   - It is zapped or it is being zapped.
+ *
+ * This function completely checks the spte when the last spte
+ * is not the mmio spte.
+ */
+static bool check_direct_spte_mmio_pf(u64 spte)
+{
+	return __check_direct_spte_mmio_pf(spte);
+}
+
+static u64 walk_shadow_page_get_mmio_spte(struct kvm_vcpu *vcpu, u64 addr)
+{
+	struct kvm_shadow_walk_iterator iterator;
+	u64 spte = 0ull;
+
+	walk_shadow_page_lockless_begin(vcpu);
+	for_each_shadow_entry_lockless(vcpu, addr, iterator, spte)
+		if (!is_shadow_present_pte(spte))
+			break;
+	walk_shadow_page_lockless_end(vcpu);
+
+	return spte;
+}
+
+/*
+ * If it is a real mmio page fault, return 1 and emulat the instruction
+ * directly, return 0 to let CPU fault again on the address, -1 is
+ * returned if bug is detected.
+ */
+int handle_mmio_page_fault_common(struct kvm_vcpu *vcpu, u64 addr, bool direct)
+{
+	u64 spte;
+
+	if (quickly_check_mmio_pf(vcpu, addr, direct))
+		return 1;
+
+	spte = walk_shadow_page_get_mmio_spte(vcpu, addr);
+
+	if (is_mmio_spte(spte)) {
+		gfn_t gfn = get_mmio_spte_gfn(spte);
+		unsigned access = get_mmio_spte_access(spte);
+
+		if (direct)
+			addr = 0;
+		vcpu_cache_mmio_info(vcpu, addr, gfn, access);
+		return 1;
+	}
+
+	/*
+	 * It's ok if the gva is remapped by other cpus on shadow guest,
+	 * it's a BUG if the gfn is not a mmio page.
+	 */
+	if (direct && !check_direct_spte_mmio_pf(spte))
+		return -1;
+
+	/*
+	 * If the page table is zapped by other cpus, let CPU fault again on
+	 * the address.
+	 */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(handle_mmio_page_fault_common);
+
+static int handle_mmio_page_fault(struct kvm_vcpu *vcpu, u64 addr,
+				  u32 error_code, bool direct)
+{
+	int ret;
+
+	ret = handle_mmio_page_fault_common(vcpu, addr, direct);
+	WARN_ON(ret < 0);
+	return ret;
+}
+
 static int nonpaging_page_fault(struct kvm_vcpu *vcpu, gva_t gva,
 				u32 error_code, bool prefault)
 {
@@ -2674,6 +2900,10 @@ static int nonpaging_page_fault(struct kvm_vcpu *vcpu, gva_t gva,
 	int r;
 
 	pgprintk("%s: gva %lx error %x\n", __func__, gva, error_code);
+
+	if (unlikely(error_code & PFERR_RSVD_MASK))
+		return handle_mmio_page_fault(vcpu, gva, error_code, true);
+
 	r = mmu_topup_memory_caches(vcpu);
 	if (r)
 		return r;
@@ -2749,6 +2979,9 @@ static int tdp_page_fault(struct kvm_vcpu *vcpu, gva_t gpa, u32 error_code,
 
 	ASSERT(vcpu);
 	ASSERT(VALID_PAGE(vcpu->arch.mmu.root_hpa));
+
+	if (unlikely(error_code & PFERR_RSVD_MASK))
+		return handle_mmio_page_fault(vcpu, gpa, error_code, true);
 
 	r = mmu_topup_memory_caches(vcpu);
 	if (r)
@@ -2846,6 +3079,23 @@ static bool is_rsvd_bits_set(struct kvm_mmu *mmu, u64 gpte, int level)
 
 	bit7 = (gpte >> 7) & 1;
 	return (gpte & mmu->rsvd_bits_mask[bit7][level-1]) != 0;
+}
+
+static bool sync_mmio_spte(u64 *sptep, gfn_t gfn, unsigned access,
+			   int *nr_present)
+{
+	if (unlikely(is_mmio_spte(*sptep))) {
+		if (gfn != get_mmio_spte_gfn(*sptep)) {
+			mmu_spte_clear_no_track(sptep);
+			return true;
+		}
+
+		(*nr_present)++;
+		mark_mmio_spte(sptep, gfn, access);
+		return true;
+	}
+
+	return false;
 }
 
 #define PTTYPE 64
@@ -3775,16 +4025,17 @@ out:
 int kvm_mmu_get_spte_hierarchy(struct kvm_vcpu *vcpu, u64 addr, u64 sptes[4])
 {
 	struct kvm_shadow_walk_iterator iterator;
+	u64 spte;
 	int nr_sptes = 0;
 
-	spin_lock(&vcpu->kvm->mmu_lock);
-	for_each_shadow_entry(vcpu, addr, iterator) {
-		sptes[iterator.level-1] = *iterator.sptep;
+	walk_shadow_page_lockless_begin(vcpu);
+	for_each_shadow_entry_lockless(vcpu, addr, iterator, spte) {
+		sptes[iterator.level-1] = spte;
 		nr_sptes++;
-		if (!is_shadow_present_pte(*iterator.sptep))
+		if (!is_shadow_present_pte(spte))
 			break;
 	}
-	spin_unlock(&vcpu->kvm->mmu_lock);
+	walk_shadow_page_lockless_end(vcpu);
 
 	return nr_sptes;
 }
