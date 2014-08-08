@@ -295,6 +295,10 @@ config PM_RUNTIME_CLK
 	def_bool y
 	depends on PM_RUNTIME && HAVE_CLK
 
+config PM_GENERIC_DOMAINS
+	bool
+	depends on PM
+
 config WQ_POWER_EFFICIENT_DEFAULT
 	bool "Enable workqueue power-efficient mode by default"
 	depends on PM
