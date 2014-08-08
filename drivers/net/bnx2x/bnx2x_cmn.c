@@ -46,6 +46,25 @@ static inline void bnx2x_bz_fp(struct bnx2x *bp, int index)
 
 	/* Restore the NAPI object as it has been already initialized */
 	fp->napi = orig_napi;
+
+	fp->bp = bp;
+	fp->index = index;
+	if (IS_ETH_FP(fp))
+		fp->max_cos = bp->max_cos;
+	else
+		/* Special queues support only one CoS */
+		fp->max_cos = 1;
+
+	/*
+	 * set the tpa flag for each queue. The tpa flag determines the queue
+	 * minimal size so it must be set prior to queue memory allocation
+	 */
+	fp->disable_tpa = ((bp->flags & TPA_ENABLE_FLAG) == 0);
+
+#ifdef BCM_CNIC
+	/* We don't want TPA on FCoE, FWD and OOO L2 rings */
+	bnx2x_fcoe(bp, disable_tpa) = 1;
+#endif
 }
 
 /**
@@ -74,10 +93,10 @@ static inline void bnx2x_move_fp(struct bnx2x *bp, int from, int to)
 /* free skb in the packet ring at pos idx
  * return idx of last bd freed
  */
-static u16 bnx2x_free_tx_pkt(struct bnx2x *bp, struct bnx2x_fastpath *fp,
+static u16 bnx2x_free_tx_pkt(struct bnx2x *bp, struct bnx2x_fp_txdata *txdata,
 			     u16 idx)
 {
-	struct sw_tx_bd *tx_buf = &fp->tx_buf_ring[idx];
+	struct sw_tx_bd *tx_buf = &txdata->tx_buf_ring[idx];
 	struct eth_tx_start_bd *tx_start_bd;
 	struct eth_tx_bd *tx_data_bd;
 	struct sk_buff *skb = tx_buf->skb;
@@ -122,7 +141,7 @@ static u16 bnx2x_free_tx_pkt(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 	while (nbd > 0) {
 
 		DP(BNX2X_MSG_OFF, "free frag bd_idx %d\n", bd_idx);
-		tx_data_bd = &fp->tx_desc_ring[bd_idx].reg_bd;
+		tx_data_bd = &txdata->tx_desc_ring[bd_idx].reg_bd;
 		dma_unmap_page(&bp->pdev->dev, BD_UNMAP_ADDR(tx_data_bd),
 			       BD_UNMAP_LEN(tx_data_bd), DMA_TO_DEVICE);
 		if (--nbd)
@@ -138,20 +157,19 @@ static u16 bnx2x_free_tx_pkt(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 	return new_cons;
 }
 
-int bnx2x_tx_int(struct bnx2x_fastpath *fp)
+int bnx2x_tx_int(struct bnx2x *bp, struct bnx2x_fp_txdata *txdata)
 {
-	struct bnx2x *bp = fp->bp;
 	struct netdev_queue *txq;
-	u16 hw_cons, sw_cons, bd_cons = fp->tx_bd_cons;
+	u16 hw_cons, sw_cons, bd_cons = txdata->tx_bd_cons;
 
 #ifdef BNX2X_STOP_ON_ERROR
 	if (unlikely(bp->panic))
 		return -1;
 #endif
 
-	txq = netdev_get_tx_queue(bp->dev, fp->index);
-	hw_cons = le16_to_cpu(*fp->tx_cons_sb);
-	sw_cons = fp->tx_pkt_cons;
+	txq = netdev_get_tx_queue(bp->dev, txdata->txq_index);
+	hw_cons = le16_to_cpu(*txdata->tx_cons_sb);
+	sw_cons = txdata->tx_pkt_cons;
 
 	while (sw_cons != hw_cons) {
 		u16 pkt_cons;
@@ -160,14 +178,14 @@ int bnx2x_tx_int(struct bnx2x_fastpath *fp)
 
 		DP(NETIF_MSG_TX_DONE, "queue[%d]: hw_cons %u  sw_cons %u "
 				      " pkt_cons %u\n",
-		   fp->index, hw_cons, sw_cons, pkt_cons);
+		   txdata->txq_index, hw_cons, sw_cons, pkt_cons);
 
-		bd_cons = bnx2x_free_tx_pkt(bp, fp, pkt_cons);
+		bd_cons = bnx2x_free_tx_pkt(bp, txdata, pkt_cons);
 		sw_cons++;
 	}
 
-	fp->tx_pkt_cons = sw_cons;
-	fp->tx_bd_cons = bd_cons;
+	txdata->tx_pkt_cons = sw_cons;
+	txdata->tx_bd_cons = bd_cons;
 
 	/* Need to make the tx_bd_cons update visible to start_xmit()
 	 * before checking for netif_tx_queue_stopped().  Without the
@@ -192,7 +210,7 @@ int bnx2x_tx_int(struct bnx2x_fastpath *fp)
 
 		if ((netif_tx_queue_stopped(txq)) &&
 		    (bp->state == BNX2X_STATE_OPEN) &&
-		    (bnx2x_tx_avail(fp) >= MAX_SKB_FRAGS + 3))
+		    (bnx2x_tx_avail(bp, txdata) >= MAX_SKB_FRAGS + 3))
 			netif_tx_wake_queue(txq);
 
 		__netif_tx_unlock(txq);
@@ -737,6 +755,7 @@ static irqreturn_t bnx2x_msix_fp_int(int irq, void *fp_cookie)
 {
 	struct bnx2x_fastpath *fp = fp_cookie;
 	struct bnx2x *bp = fp->bp;
+	u8 cos;
 
 	/* Return here if interrupt is disabled */
 	if (unlikely(atomic_read(&bp->intr_sem) != 0)) {
@@ -756,7 +775,10 @@ static irqreturn_t bnx2x_msix_fp_int(int irq, void *fp_cookie)
 
 	/* Handle Rx and Tx according to MSI-X vector */
 	prefetch(fp->rx_cons_sb);
-	prefetch(fp->tx_cons_sb);
+
+	for_each_cos_in_tx_queue(fp, cos)
+		prefetch(fp->txdata[cos].tx_cons_sb);
+
 	prefetch(&fp->sb_running_index[SM_RX_ID]);
 	napi_schedule(&bnx2x_fp(bp, fp->index, napi));
 
@@ -1023,17 +1045,22 @@ void bnx2x_init_rx_rings(struct bnx2x *bp)
 static void bnx2x_free_tx_skbs(struct bnx2x *bp)
 {
 	int i;
+	u8 cos;
 
 	for_each_tx_queue(bp, i) {
 		struct bnx2x_fastpath *fp = &bp->fp[i];
+		for_each_cos_in_tx_queue(fp, cos) {
+			struct bnx2x_fp_txdata *txdata = &fp->txdata[cos];
 
-		u16 bd_cons = fp->tx_bd_cons;
-		u16 sw_prod = fp->tx_pkt_prod;
-		u16 sw_cons = fp->tx_pkt_cons;
+			u16 bd_cons = txdata->tx_bd_cons;
+			u16 sw_prod = txdata->tx_pkt_prod;
+			u16 sw_cons = txdata->tx_pkt_cons;
 
-		while (sw_cons != sw_prod) {
-			bd_cons = bnx2x_free_tx_pkt(bp, fp, TX_BD(sw_cons));
-			sw_cons++;
+			while (sw_cons != sw_prod) {
+				bd_cons = bnx2x_free_tx_pkt(bp, txdata,
+							    TX_BD(sw_cons));
+				sw_cons++;
+			}
 		}
 	}
 }
@@ -1147,6 +1174,7 @@ int bnx2x_enable_msix(struct bnx2x *bp)
 	   bp->msix_table[msix_vec].entry, bp->msix_table[msix_vec].entry);
 	msix_vec++;
 #endif
+	/* We need separate vectors for ETH queues only (not FCoE) */
 	for_each_eth_queue(bp, i) {
 		bp->msix_table[msix_vec].entry = msix_vec;
 		DP(NETIF_MSG_IFUP, "msix_table[%d].entry = %d "
@@ -1154,7 +1182,7 @@ int bnx2x_enable_msix(struct bnx2x *bp)
 		msix_vec++;
 	}
 
-	req_cnt = BNX2X_NUM_ETH_QUEUES(bp) + CNIC_CONTEXT_USE + 1;
+	req_cnt = BNX2X_NUM_ETH_QUEUES(bp) + CNIC_PRESENT + 1;
 
 	rc = pci_enable_msix(bp->pdev, &bp->msix_table[0], req_cnt);
 
@@ -1228,7 +1256,7 @@ static int bnx2x_req_msix_irqs(struct bnx2x *bp)
 	}
 
 	i = BNX2X_NUM_ETH_QUEUES(bp);
-	offset = 1 + CNIC_CONTEXT_USE;
+	offset = 1 + CNIC_PRESENT;
 	netdev_info(bp->dev, "using MSI-X  IRQs: sp %d  fp[%d] %d"
 	       " ... fp[%d] %d\n",
 	       bp->msix_table[0].vector,
@@ -1330,13 +1358,12 @@ u16 bnx2x_select_queue(struct net_device *dev, struct sk_buff *skb)
 
 		/* If ethertype is FCoE or FIP - use FCoE ring */
 		if ((ether_type == ETH_P_FCOE) || (ether_type == ETH_P_FIP))
-			return bnx2x_fcoe(bp, index);
+			return bnx2x_fcoe_tx(bp, txq_index);
 	}
 #endif
 	/* Select a none-FCoE queue:  if FCoE is enabled, exclude FCoE L2 ring
 	 */
-	return __skb_tx_hash(dev, skb,
-			dev->real_num_tx_queues - FCOE_CONTEXT_USE);
+	return __skb_tx_hash(dev, skb, BNX2X_NUM_ETH_QUEUES(bp));
 }
 
 void bnx2x_set_num_queues(struct bnx2x *bp)
@@ -1478,6 +1505,12 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
 		goto load_error0;
 	}
 
+	/* configure multi cos mappings in kernel.
+	 * this configuration may be overriden by a multi class queue discipline
+	 * or by a dcbx negotiation result.
+	 */
+	bnx2x_setup_tc(bp->dev, bp->max_cos);
+
 	bnx2x_napi_enable(bp);
 
 	/* Send LOAD_REQUEST command to MCP
@@ -1523,6 +1556,7 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
 		bp->port.pmf = 1;
 	else
 		bp->port.pmf = 0;
+
 	DP(NETIF_MSG_LINK, "pmf %d\n", bp->port.pmf);
 
 	/* Initialize HW */
@@ -1834,6 +1868,7 @@ int bnx2x_set_power_state(struct bnx2x *bp, pci_power_t state)
 int bnx2x_poll(struct napi_struct *napi, int budget)
 {
 	int work_done = 0;
+	u8 cos;
 	struct bnx2x_fastpath *fp = container_of(napi, struct bnx2x_fastpath,
 						 napi);
 	struct bnx2x *bp = fp->bp;
@@ -1846,8 +1881,10 @@ int bnx2x_poll(struct napi_struct *napi, int budget)
 		}
 #endif
 
-		if (bnx2x_has_tx_work(fp))
-			bnx2x_tx_int(fp);
+		for_each_cos_in_tx_queue(fp, cos)
+			if (bnx2x_tx_queue_has_work(&fp->txdata[cos]))
+				bnx2x_tx_int(bp, &fp->txdata[cos]);
+
 
 		if (bnx2x_has_rx_work(fp)) {
 			work_done += bnx2x_rx_int(fp, budget - work_done);
@@ -1909,7 +1946,7 @@ int bnx2x_poll(struct napi_struct *napi, int budget)
  * in Other Operating Systems(TM)
  */
 static noinline u16 bnx2x_tx_split(struct bnx2x *bp,
-				   struct bnx2x_fastpath *fp,
+				   struct bnx2x_fp_txdata *txdata,
 				   struct sw_tx_bd *tx_buf,
 				   struct eth_tx_start_bd **tx_bd, u16 hlen,
 				   u16 bd_prod, int nbd)
@@ -1930,7 +1967,7 @@ static noinline u16 bnx2x_tx_split(struct bnx2x *bp,
 	/* now get a new data BD
 	 * (after the pbd) and fill it */
 	bd_prod = TX_BD(NEXT_TX_IDX(bd_prod));
-	d_tx_bd = &fp->tx_desc_ring[bd_prod].reg_bd;
+	d_tx_bd = &txdata->tx_desc_ring[bd_prod].reg_bd;
 
 	mapping = HILO_U64(le32_to_cpu(h_tx_bd->addr_hi),
 			   le32_to_cpu(h_tx_bd->addr_lo)) + hlen;
@@ -2210,8 +2247,10 @@ static inline u8 bnx2x_set_pbd_csum(struct bnx2x *bp, struct sk_buff *skb,
 netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct bnx2x *bp = netdev_priv(dev);
+
 	struct bnx2x_fastpath *fp;
 	struct netdev_queue *txq;
+	struct bnx2x_fp_txdata *txdata;
 	struct sw_tx_bd *tx_buf;
 	struct eth_tx_start_bd *tx_start_bd;
 	struct eth_tx_bd *tx_data_bd, *total_pkt_bd = NULL;
@@ -2219,7 +2258,7 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct eth_tx_parse_bd_e2 *pbd_e2 = NULL;
 	u32 pbd_e2_parsing_data = 0;
 	u16 pkt_prod, bd_prod;
-	int nbd, fp_index;
+	int nbd, txq_index, fp_index, txdata_index;
 	dma_addr_t mapping;
 	u32 xmit_type = bnx2x_xmit_type(bp, skb);
 	int i;
@@ -2233,12 +2272,43 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_BUSY;
 #endif
 
-	fp_index = skb_get_queue_mapping(skb);
-	txq = netdev_get_tx_queue(dev, fp_index);
+	txq_index = skb_get_queue_mapping(skb);
+	txq = netdev_get_tx_queue(dev, txq_index);
 
+	BUG_ON(txq_index >= MAX_ETH_TXQ_IDX(bp) + FCOE_PRESENT);
+
+	/* decode the fastpath index and the cos index from the txq */
+	fp_index = TXQ_TO_FP(txq_index);
+	txdata_index = TXQ_TO_COS(txq_index);
+
+#ifdef BCM_CNIC
+	/*
+	 * Override the above for the FCoE queue:
+	 *   - FCoE fp entry is right after the ETH entries.
+	 *   - FCoE L2 queue uses bp->txdata[0] only.
+	 */
+	if (unlikely(!NO_FCOE(bp) && (txq_index ==
+				      bnx2x_fcoe_tx(bp, txq_index)))) {
+		fp_index = FCOE_IDX;
+		txdata_index = 0;
+	}
+#endif
+
+	/* enable this debug print to view the transmission queue being used
+	DP(BNX2X_MSG_FP, "indices: txq %d, fp %d, txdata %d",
+	   txq_index, fp_index, txdata_index); */
+
+	/* locate the fastpath and the txdata */
 	fp = &bp->fp[fp_index];
+	txdata = &fp->txdata[txdata_index];
 
-	if (unlikely(bnx2x_tx_avail(fp) < (skb_shinfo(skb)->nr_frags + 3))) {
+	/* enable this debug print to view the tranmission details
+	DP(BNX2X_MSG_FP,"transmitting packet cid %d fp index %d txdata_index %d"
+			" tx_data ptr %p fp pointer %p",
+	   txdata->cid, fp_index, txdata_index, txdata, fp); */
+
+	if (unlikely(bnx2x_tx_avail(bp, txdata) <
+		     (skb_shinfo(skb)->nr_frags + 3))) {
 		fp->eth_q_stats.driver_xoff++;
 		netif_tx_stop_queue(txq);
 		BNX2X_ERR("BUG! Tx ring full when queue awake!\n");
@@ -2247,7 +2317,7 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	DP(NETIF_MSG_TX_QUEUED, "queue[%d]: SKB: summed %x  protocol %x  "
 				"protocol(%x,%x) gso type %x  xmit_type %x\n",
-	   fp_index, skb->ip_summed, skb->protocol, ipv6_hdr(skb)->nexthdr,
+	   txq_index, skb->ip_summed, skb->protocol, ipv6_hdr(skb)->nexthdr,
 	   ip_hdr(skb)->protocol, skb_shinfo(skb)->gso_type, xmit_type);
 
 	eth = (struct ethhdr *)skb->data;
@@ -2300,13 +2370,13 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	SET_FLAG(tx_start_bd->general_data, ETH_TX_START_BD_HDR_NBDS, 1);
 
 	/* remember the first BD of the packet */
-	tx_buf->first_bd = fp->tx_bd_prod;
+	tx_buf->first_bd = txdata->tx_bd_prod;
 	tx_buf->skb = skb;
 	tx_buf->flags = 0;
 
 	DP(NETIF_MSG_TX_QUEUED,
 	   "sending pkt %u @%p  next_idx %u  bd %u @%p\n",
-	   pkt_prod, tx_buf, fp->tx_pkt_prod, bd_prod, tx_start_bd);
+	   pkt_prod, tx_buf, txdata->tx_pkt_prod, bd_prod, tx_start_bd);
 
 	if (vlan_tx_tag_present(skb)) {
 		tx_start_bd->vlan_or_ethertype =
@@ -2343,7 +2413,7 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 						     &pbd_e2_parsing_data,
 						     xmit_type);
 	} else {
-		pbd_e1x = &fp->tx_desc_ring[bd_prod].parse_bd_e1x;
+		pbd_e1x = &txdata->tx_desc_ring[bd_prod].parse_bd_e1x;
 		memset(pbd_e1x, 0, sizeof(struct eth_tx_parse_bd_e1x));
 		/* Set PBD in checksum offload case */
 		if (xmit_type & XMIT_CSUM)
@@ -2460,16 +2530,16 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 */
 	wmb();
 
-	fp->tx_db.data.prod += nbd;
+	txdata->tx_db.data.prod += nbd;
 	barrier();
 
-	DOORBELL(bp, fp->cid, fp->tx_db.raw);
+	DOORBELL(bp, txdata->cid, txdata->tx_db.raw);
 
 	mmiowb();
 
-	fp->tx_bd_prod += nbd;
+	txdata->tx_bd_prod += nbd;
 
-	if (unlikely(bnx2x_tx_avail(fp) < MAX_SKB_FRAGS + 3)) {
+	if (unlikely(bnx2x_tx_avail(bp, txdata) < MAX_SKB_FRAGS + 3)) {
 		netif_tx_stop_queue(txq);
 
 		/* paired memory barrier is in bnx2x_tx_int(), we have to keep
@@ -2478,12 +2548,79 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		smp_mb();
 
 		fp->eth_q_stats.driver_xoff++;
-		if (bnx2x_tx_avail(fp) >= MAX_SKB_FRAGS + 3)
+		if (bnx2x_tx_avail(bp, txdata) >= MAX_SKB_FRAGS + 3)
 			netif_tx_wake_queue(txq);
 	}
-	fp->tx_pkt++;
+	txdata->tx_pkt++;
 
 	return NETDEV_TX_OK;
+}
+
+/**
+ * bnx2x_setup_tc - routine to configure net_device for multi tc
+ *
+ * @netdev: net device to configure
+ * @tc: number of traffic classes to enable
+ *
+ * callback connected to the ndo_setup_tc function pointer
+ */
+int bnx2x_setup_tc(struct net_device *dev, u8 num_tc)
+{
+	int cos, prio, count, offset;
+	struct bnx2x *bp = netdev_priv(dev);
+
+	/* setup tc must be called under rtnl lock */
+	ASSERT_RTNL();
+
+	/* no traffic classes requested. aborting */
+	if (!num_tc) {
+		netdev_reset_tc(dev);
+		return 0;
+	}
+
+	/* requested to support too many traffic classes */
+	if (num_tc > bp->max_cos) {
+		DP(NETIF_MSG_TX_ERR, "support for too many traffic classes"
+				     " requested: %d. max supported is %d",
+				     num_tc, bp->max_cos);
+		return -EINVAL;
+	}
+
+	/* declare amount of supported traffic classes */
+	if (netdev_set_num_tc(dev, num_tc)) {
+		DP(NETIF_MSG_TX_ERR, "failed to declare %d traffic classes",
+				     num_tc);
+		return -EINVAL;
+	}
+
+	/* configure priority to traffic class mapping */
+	for (prio = 0; prio < BNX2X_MAX_PRIORITY; prio++) {
+		netdev_set_prio_tc_map(dev, prio, bp->prio_to_cos[prio]);
+		DP(BNX2X_MSG_SP, "mapping priority %d to tc %d",
+		   prio, bp->prio_to_cos[prio]);
+	}
+
+
+	/* Use this configuration to diffrentiate tc0 from other COSes
+	   This can be used for ets or pfc, and save the effort of setting
+	   up a multio class queue disc or negotiating DCBX with a switch
+	netdev_set_prio_tc_map(dev, 0, 0);
+	DP(BNX2X_MSG_SP, "mapping priority %d to tc %d", 0, 0);
+	for (prio = 1; prio < 16; prio++) {
+		netdev_set_prio_tc_map(dev, prio, 1);
+		DP(BNX2X_MSG_SP, "mapping priority %d to tc %d", prio, 1);
+	} */
+
+	/* configure traffic class to transmission queue mapping */
+	for (cos = 0; cos < bp->max_cos; cos++) {
+		count = BNX2X_NUM_ETH_QUEUES(bp);
+		offset = cos * MAX_TXQS_PER_COS;
+		netdev_set_tc_queue(dev, cos, count, offset);
+		DP(BNX2X_MSG_SP, "mapping tc %d to offset %d count %d",
+		   cos, offset, count);
+	}
+
+	return 0;
 }
 
 /* called with rtnl_lock */
@@ -2506,6 +2643,7 @@ static void bnx2x_free_fp_mem_at(struct bnx2x *bp, int fp_index)
 {
 	union host_hc_status_block *sb = &bnx2x_fp(bp, fp_index, status_blk);
 	struct bnx2x_fastpath *fp = &bp->fp[fp_index];
+	u8 cos;
 
 	/* Common */
 #ifdef BCM_CNIC
@@ -2554,10 +2692,18 @@ static void bnx2x_free_fp_mem_at(struct bnx2x *bp, int fp_index)
 	/* Tx */
 	if (!skip_tx_queue(bp, fp_index)) {
 		/* fastpath tx rings: tx_buf tx_desc */
-		BNX2X_FREE(bnx2x_fp(bp, fp_index, tx_buf_ring));
-		BNX2X_PCI_FREE(bnx2x_fp(bp, fp_index, tx_desc_ring),
-			       bnx2x_fp(bp, fp_index, tx_desc_mapping),
-			       sizeof(union eth_tx_bd_types) * NUM_TX_BD);
+		for_each_cos_in_tx_queue(fp, cos) {
+			struct bnx2x_fp_txdata *txdata = &fp->txdata[cos];
+
+			DP(BNX2X_MSG_SP,
+			   "freeing tx memory of fp %d cos %d cid %d",
+			   fp_index, cos, txdata->cid);
+
+			BNX2X_FREE(txdata->tx_buf_ring);
+			BNX2X_PCI_FREE(txdata->tx_desc_ring,
+				txdata->tx_desc_mapping,
+				sizeof(union eth_tx_bd_types) * NUM_TX_BD);
+		}
 	}
 	/* end of fastpath */
 }
@@ -2590,18 +2736,16 @@ static int bnx2x_alloc_fp_mem_at(struct bnx2x *bp, int index)
 	union host_hc_status_block *sb;
 	struct bnx2x_fastpath *fp = &bp->fp[index];
 	int ring_size = 0;
+	u8 cos;
 
 	/* if rx_ring_size specified - use it */
 	int rx_ring_size = bp->rx_ring_size ? bp->rx_ring_size :
-			   MAX_RX_AVAIL/bp->num_queues;
+			   MAX_RX_AVAIL/BNX2X_NUM_RX_QUEUES(bp);
 
 	/* allocate at least number of buffers required by FW */
-	rx_ring_size = max_t(int, fp->disable_tpa ? MIN_RX_SIZE_NONTPA :
+	rx_ring_size = max_t(int, bp->disable_tpa ? MIN_RX_SIZE_NONTPA :
 						    MIN_RX_SIZE_TPA,
 				  rx_ring_size);
-
-	bnx2x_fp(bp, index, bp) = bp;
-	bnx2x_fp(bp, index, index) = index;
 
 	/* Common */
 	sb = &bnx2x_fp(bp, index, status_blk);
@@ -2625,11 +2769,19 @@ static int bnx2x_alloc_fp_mem_at(struct bnx2x *bp, int index)
 	/* Tx */
 	if (!skip_tx_queue(bp, index)) {
 		/* fastpath tx rings: tx_buf tx_desc */
-		BNX2X_ALLOC(bnx2x_fp(bp, index, tx_buf_ring),
+		for_each_cos_in_tx_queue(fp, cos) {
+			struct bnx2x_fp_txdata *txdata = &fp->txdata[cos];
+
+			DP(BNX2X_MSG_SP, "allocating tx memory of "
+					 "fp %d cos %d",
+			   index, cos);
+
+			BNX2X_ALLOC(txdata->tx_buf_ring,
 				sizeof(struct sw_tx_bd) * NUM_TX_BD);
-		BNX2X_PCI_ALLOC(bnx2x_fp(bp, index, tx_desc_ring),
-				&bnx2x_fp(bp, index, tx_desc_mapping),
+			BNX2X_PCI_ALLOC(txdata->tx_desc_ring,
+				&txdata->tx_desc_mapping,
 				sizeof(union eth_tx_bd_types) * NUM_TX_BD);
+		}
 	}
 
 	/* Rx */
@@ -2672,7 +2824,7 @@ alloc_mem_err:
 						index, ring_size);
 	/* FW will drop all packets if queue is not big enough,
 	 * In these cases we disable the queue
-	 * Min size diferent for TPA and non-TPA queues
+	 * Min size is different for OOO, TPA and non-TPA queues
 	 */
 	if (ring_size < (fp->disable_tpa ?
 				MIN_RX_SIZE_NONTPA : MIN_RX_SIZE_TPA)) {
@@ -2690,17 +2842,20 @@ int bnx2x_alloc_fp_mem(struct bnx2x *bp)
 	/**
 	 * 1. Allocate FP for leading - fatal if error
 	 * 2. {CNIC} Allocate FCoE FP - fatal if error
-	 * 3. Allocate RSS - fix number of queues if error
+	 * 3. {CNIC} Allocate OOO + FWD - disable OOO if error
+	 * 4. Allocate RSS - fix number of queues if error
 	 */
 
 	/* leading */
 	if (bnx2x_alloc_fp_mem_at(bp, 0))
 		return -ENOMEM;
+
 #ifdef BCM_CNIC
 	/* FCoE */
 	if (bnx2x_alloc_fp_mem_at(bp, FCOE_IDX))
 		return -ENOMEM;
 #endif
+
 	/* RSS */
 	for_each_nondefault_eth_queue(bp, i)
 		if (bnx2x_alloc_fp_mem_at(bp, i))
@@ -2718,7 +2873,7 @@ int bnx2x_alloc_fp_mem(struct bnx2x *bp)
 		 * FCOE_IDX < FWD_IDX < OOO_IDX
 		 */
 
-		/* move FCoE fp */
+		/* move FCoE fp even NO_FCOE_FLAG is on */
 		bnx2x_move_fp(bp, FCOE_IDX, FCOE_IDX - delta);
 #endif
 		bp->num_queues -= delta;
@@ -2765,16 +2920,23 @@ int __devinit bnx2x_alloc_mem_bp(struct bnx2x *bp)
 	struct bnx2x_fastpath *fp;
 	struct msix_entry *tbl;
 	struct bnx2x_ilt *ilt;
+	int msix_table_size = 0;
 
-	/* fp array */
-	fp = kzalloc(L2_FP_COUNT(bp->l2_cid_count)*sizeof(*fp), GFP_KERNEL);
+	/*
+	 * The biggest MSI-X table we might need is as a maximum number of fast
+	 * path IGU SBs plus default SB (for PF).
+	 */
+	msix_table_size = bp->igu_sb_cnt + 1;
+
+	/* fp array: RSS plus CNIC related L2 queues */
+	fp = kzalloc((BNX2X_MAX_RSS_COUNT(bp) + NON_ETH_CONTEXT_USE) *
+		     sizeof(*fp), GFP_KERNEL);
 	if (!fp)
 		goto alloc_err;
 	bp->fp = fp;
 
 	/* msix table */
-	tbl = kzalloc((FP_SB_COUNT(bp->l2_cid_count) + 1) * sizeof(*tbl),
-				  GFP_KERNEL);
+	tbl = kzalloc(msix_table_size * sizeof(*tbl), GFP_KERNEL);
 	if (!tbl)
 		goto alloc_err;
 	bp->msix_table = tbl;

@@ -880,6 +880,7 @@ void bnx2x_panic_dump(struct bnx2x *bp)
 	int func = BP_FUNC(bp);
 #ifdef BNX2X_STOP_ON_ERROR
 	u16 start = 0, end = 0;
+	u8 cos;
 #endif
 
 	bp->stats_state = STATS_STATE_DISABLED;
@@ -949,11 +950,17 @@ void bnx2x_panic_dump(struct bnx2x *bp)
 			  le16_to_cpu(fp->fp_hc_idx));
 
 		/* Tx */
-		BNX2X_ERR("fp%d: tx_pkt_prod(0x%x)  tx_pkt_cons(0x%x)"
-			  "  tx_bd_prod(0x%x)  tx_bd_cons(0x%x)"
-			  "  *tx_cons_sb(0x%x)\n",
-			  i, fp->tx_pkt_prod, fp->tx_pkt_cons, fp->tx_bd_prod,
-			  fp->tx_bd_cons, le16_to_cpu(*fp->tx_cons_sb));
+		for_each_cos_in_tx_queue(fp, cos)
+		{
+			txdata = fp->txdata[cos];
+			BNX2X_ERR("fp%d: tx_pkt_prod(0x%x)  tx_pkt_cons(0x%x)"
+				  "  tx_bd_prod(0x%x)  tx_bd_cons(0x%x)"
+				  "  *tx_cons_sb(0x%x)\n",
+				  i, txdata.tx_pkt_prod,
+				  txdata.tx_pkt_cons, txdata.tx_bd_prod,
+				  txdata.tx_bd_cons,
+				  le16_to_cpu(*txdata.tx_cons_sb));
+		}
 
 		loop = CHIP_IS_E2(bp) ?
 			HC_SB_MAX_INDICES_E2 : HC_SB_MAX_INDICES_E1X;
@@ -1068,23 +1075,31 @@ void bnx2x_panic_dump(struct bnx2x *bp)
 	/* Tx */
 	for_each_tx_queue(bp, i) {
 		struct bnx2x_fastpath *fp = &bp->fp[i];
+		for_each_cos_in_tx_queue(fp, cos) {
+			struct bnx2x_fp_txdata *txdata = &fp->txdata[cos];
 
-		start = TX_BD(le16_to_cpu(*fp->tx_cons_sb) - 10);
-		end = TX_BD(le16_to_cpu(*fp->tx_cons_sb) + 245);
-		for (j = start; j != end; j = TX_BD(j + 1)) {
-			struct sw_tx_bd *sw_bd = &fp->tx_buf_ring[j];
+			start = TX_BD(le16_to_cpu(*txdata->tx_cons_sb) - 10);
+			end = TX_BD(le16_to_cpu(*txdata->tx_cons_sb) + 245);
+			for (j = start; j != end; j = TX_BD(j + 1)) {
+				struct sw_tx_bd *sw_bd =
+					&txdata->tx_buf_ring[j];
 
-			BNX2X_ERR("fp%d: packet[%x]=[%p,%x]\n",
-				  i, j, sw_bd->skb, sw_bd->first_bd);
-		}
+				BNX2X_ERR("fp%d: txdata %d, "
+					  "packet[%x]=[%p,%x]\n",
+					  i, cos, j, sw_bd->skb,
+					  sw_bd->first_bd);
+			}
 
-		start = TX_BD(fp->tx_bd_cons - 10);
-		end = TX_BD(fp->tx_bd_cons + 254);
-		for (j = start; j != end; j = TX_BD(j + 1)) {
-			u32 *tx_bd = (u32 *)&fp->tx_desc_ring[j];
+			start = TX_BD(txdata->tx_bd_cons - 10);
+			end = TX_BD(txdata->tx_bd_cons + 254);
+			for (j = start; j != end; j = TX_BD(j + 1)) {
+				u32 *tx_bd = (u32 *)&txdata->tx_desc_ring[j];
 
-			BNX2X_ERR("fp%d: tx_bd[%x]=[%x:%x:%x:%x]\n",
-				  i, j, tx_bd[0], tx_bd[1], tx_bd[2], tx_bd[3]);
+				BNX2X_ERR("fp%d: txdata %d, tx_bd[%x]="
+					  "[%x:%x:%x:%x]\n",
+					  i, cos, j, tx_bd[0], tx_bd[1],
+					  tx_bd[2], tx_bd[3]);
+			}
 		}
 	}
 #endif
@@ -1273,7 +1288,7 @@ static void bnx2x_igu_int_disable(struct bnx2x *bp)
 		BNX2X_ERR("BUG! proper val not read from IGU!\n");
 }
 
-static void bnx2x_int_disable(struct bnx2x *bp)
+void bnx2x_int_disable(struct bnx2x *bp)
 {
 	if (bp->common.int_block == INT_BLOCK_HC)
 		bnx2x_hc_int_disable(bp);
@@ -1404,6 +1419,7 @@ irqreturn_t bnx2x_interrupt(int irq, void *dev_instance)
 	u16 status = bnx2x_ack_int(bp);
 	u16 mask;
 	int i;
+	u8 cos;
 
 	/* Return here if interrupt is shared and it's not for us */
 	if (unlikely(status == 0)) {
@@ -3894,6 +3910,7 @@ irqreturn_t bnx2x_msix_sp_int(int irq, void *dev_instance)
 
 static void bnx2x_timer(unsigned long data)
 {
+	u8 cos;
 	struct bnx2x *bp = (struct bnx2x *) data;
 
 	if (!netif_running(bp->dev))
@@ -3905,7 +3922,8 @@ static void bnx2x_timer(unsigned long data)
 	if (poll) {
 		struct bnx2x_fastpath *fp = &bp->fp[0];
 
-		bnx2x_tx_int(fp);
+		for_each_cos_in_tx_queue(fp, cos)
+			bnx2x_tx_int(bp, &fp->txdata[cos]);
 		bnx2x_rx_int(fp, 1000);
 	}
 
@@ -4124,10 +4142,17 @@ static void bnx2x_update_coalesce_sb_index(struct bnx2x *bp, u16 fw_sb_id,
 static void bnx2x_update_coalesce_sb(struct bnx2x *bp, u16 fw_sb_id,
 				     u16 tx_usec, u16 rx_usec)
 {
-	bnx2x_update_coalesce_sb_index(bp, fw_sb_id, U_SB_ETH_RX_CQ_INDEX,
+	bnx2x_update_coalesce_sb_index(bp, fw_sb_id, HC_INDEX_ETH_RX_CQ_CONS,
 				    false, rx_usec);
-	bnx2x_update_coalesce_sb_index(bp, fw_sb_id, C_SB_ETH_TX_CQ_INDEX,
-				    false, tx_usec);
+	bnx2x_update_coalesce_sb_index(bp, fw_sb_id,
+				       HC_INDEX_ETH_TX_CQ_CONS_COS0, false,
+				       tx_usec);
+	bnx2x_update_coalesce_sb_index(bp, fw_sb_id,
+				       HC_INDEX_ETH_TX_CQ_CONS_COS1, false,
+				       tx_usec);
+	bnx2x_update_coalesce_sb_index(bp, fw_sb_id,
+				       HC_INDEX_ETH_TX_CQ_CONS_COS2, false,
+				       tx_usec);
 }
 
 static void bnx2x_init_def_sb(struct bnx2x *bp)
@@ -5981,7 +6006,7 @@ int bnx2x_alloc_mem(struct bnx2x *bp)
 	BNX2X_PCI_ALLOC(bp->slowpath, &bp->slowpath_mapping,
 			sizeof(struct bnx2x_slowpath));
 
-	bp->context.size = sizeof(union cdu_context) * bp->l2_cid_count;
+	bp->context.size = sizeof(union cdu_context) * BNX2X_L2_CID_COUNT(bp);
 
 	BNX2X_PCI_ALLOC(bp->context.vcxt, &bp->context.cxt_mapping,
 			bp->context.size);
@@ -6658,7 +6683,7 @@ static int __devinit bnx2x_set_int_mode(struct bnx2x *bp)
 		bnx2x_enable_msi(bp);
 		/* falling through... */
 	case INT_MODE_INTx:
-		bp->num_queues = 1 + NONE_ETH_CONTEXT_USE;
+		bp->num_queues = 1 + NON_ETH_CONTEXT_USE;
 		DP(NETIF_MSG_IFUP, "set number of queues to 1\n");
 		break;
 	default:
@@ -6681,8 +6706,8 @@ static int __devinit bnx2x_set_int_mode(struct bnx2x *bp)
 					  "enable MSI-X (%d), "
 					  "set number of queues to %d\n",
 				   bp->num_queues,
-				   1 + NONE_ETH_CONTEXT_USE);
-			bp->num_queues = 1 + NONE_ETH_CONTEXT_USE;
+				   1 + NON_ETH_CONTEXT_USE);
+			bp->num_queues = 1 + NON_ETH_CONTEXT_USE;
 
 			if (!(bp->flags & DISABLE_MSI_FLAG))
 				bnx2x_enable_msi(bp);
@@ -7906,14 +7931,11 @@ static void __devinit bnx2x_get_igu_cam_info(struct bnx2x *bp)
 	int vn = BP_E1HVN(bp);
 	int igu_sb_id;
 	u32 val;
-	u8 fid;
+	u8 fid, igu_sb_cnt = 0;
 
 	bp->igu_base_sb = 0xff;
-	bp->igu_sb_cnt = 0;
 	if (CHIP_INT_MODE_IS_BC(bp)) {
-		bp->igu_sb_cnt = min_t(u8, FP_SB_MAX_E1x,
-				       NUM_IGU_SB_REQUIRED(bp->l2_cid_count));
-
+		igu_sb_cnt = bp->igu_sb_cnt;
 		bp->igu_base_sb = (CHIP_MODE_IS_4_PORT(bp) ? pfid : vn) *
 			FP_SB_MAX_E1x;
 
@@ -8460,13 +8482,14 @@ static int __devinit bnx2x_get_hwinfo(struct bnx2x *bp)
 
 	bnx2x_get_common_hwinfo(bp);
 
+	/*
+	 * initialize IGU parameters
+	 */
 	if (CHIP_IS_E1x(bp)) {
 		bp->common.int_block = INT_BLOCK_HC;
 
 		bp->igu_dsb_id = DEF_SB_IGU_ID;
 		bp->igu_base_sb = 0;
-		bp->igu_sb_cnt = min_t(u8, FP_SB_MAX_E1x,
-				       NUM_IGU_SB_REQUIRED(bp->l2_cid_count));
 	} else {
 		bp->common.int_block = INT_BLOCK_IGU;
 		val = REG_RD(bp, IGU_REG_BLOCK_CONFIGURATION);
@@ -8611,6 +8634,14 @@ static int __devinit bnx2x_get_hwinfo(struct bnx2x *bp)
 #ifdef BCM_CNIC
 	bnx2x_get_cnic_info(bp);
 #endif
+
+	/* multiple tx priority */
+	if (CHIP_IS_E1x(bp))
+		bp->max_cos = BNX2X_MULTI_TX_COS_E1X;
+	if (CHIP_IS_E2(bp) || CHIP_IS_E3A0(bp))
+		bp->max_cos = BNX2X_MULTI_TX_COS_E2_E3A0;
+	if (CHIP_IS_E3B0(bp))
+		bp->max_cos = BNX2X_MULTI_TX_COS_E3B0;
 
 	return rc;
 }
@@ -9124,6 +9155,8 @@ static const struct net_device_ops bnx2x_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= poll_bnx2x,
 #endif
+	.ndo_setup_tc		= bnx2x_setup_tc,
+
 };
 
 static int __devinit bnx2x_init_dev(struct pci_dev *pdev,
@@ -9219,16 +9252,6 @@ static int __devinit bnx2x_init_dev(struct pci_dev *pdev,
 		goto err_out_release;
 	}
 
-	bp->doorbells = ioremap_nocache(pci_resource_start(pdev, 2),
-					min_t(u64, BNX2X_DB_SIZE(bp),
-					      pci_resource_len(pdev, 2)));
-	if (!bp->doorbells) {
-		dev_err(&bp->pdev->dev,
-			"Cannot map doorbell space, aborting\n");
-		rc = -ENOMEM;
-		goto err_out_unmap;
-	}
-
 	bnx2x_set_power_state(bp, PCI_D0);
 
 	/* clean indirect addresses */
@@ -9274,16 +9297,6 @@ static int __devinit bnx2x_init_dev(struct pci_dev *pdev,
 	bp->mdio.mdio_write = bnx2x_mdio_write;
 
 	return 0;
-
-err_out_unmap:
-	if (bp->regview) {
-		iounmap(bp->regview);
-		bp->regview = NULL;
-	}
-	if (bp->doorbells) {
-		iounmap(bp->doorbells);
-		bp->doorbells = NULL;
-	}
 
 err_out_release:
 	if (atomic_read(&pdev->enable_cnt) == 1)

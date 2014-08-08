@@ -2571,6 +2571,15 @@ config FTGMAC100
 	  from Faraday. It is used on Faraday A369, Andes AG102 and some
 	  other ARM/NDS32 SoC's.
 
+config FTGMAC100
+	tristate "Faraday FTGMAC100 Gigabit Ethernet support"
+	depends on ARM
+	select PHYLIB
+	help
+	  This driver supports the FTGMAC100 Gigabit Ethernet controller
+	  from Faraday. It is used on Faraday A369, Andes AG102 and some
+	  other ARM/NDS32 SoC's.
+
 endif # NETDEV_1000
 
 #

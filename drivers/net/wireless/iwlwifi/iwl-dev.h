@@ -547,7 +547,8 @@ enum iwl_ucode_tlv_type {
 	IWL_UCODE_TLV_INIT_ERRLOG_PTR	= 13,
 	IWL_UCODE_TLV_ENHANCE_SENS_TBL	= 14,
 	IWL_UCODE_TLV_PHY_CALIBRATION_SIZE = 15,
-	/* 16 and 17 reserved for future use */
+	IWL_UCODE_TLV_WOWLAN_INST	= 16,
+	IWL_UCODE_TLV_WOWLAN_DATA	= 17,
 	IWL_UCODE_TLV_FLAGS		= 18,
 };
 
@@ -1269,6 +1270,7 @@ struct iwl_priv {
 					   iwl_ucode.ver */
 	struct fw_img ucode_rt;
 	struct fw_img ucode_init;
+	struct fw_img ucode_wowlan;
 
 	enum iwlagn_ucode_subtype ucode_type;
 	u8 ucode_write_complete;	/* the image write is complete */
@@ -1340,6 +1342,8 @@ struct iwl_priv {
 	u8 is_open;
 
 	u8 mac80211_registered;
+
+	bool wowlan;
 
 	/* eeprom -- this is in the card's little endian byte order */
 	u8 *eeprom;
@@ -1492,6 +1496,7 @@ struct iwl_priv {
 	struct dentry *debugfs_dir;
 	u32 dbgfs_sram_offset, dbgfs_sram_len;
 	bool disable_ht40;
+	void *wowlan_sram;
 #endif /* CONFIG_IWLWIFI_DEBUGFS */
 
 	struct work_struct txpower_work;
@@ -1512,6 +1517,11 @@ struct iwl_priv {
 #endif
 	u32 dbg_fixed_rate;
 
+	/* WoWLAN GTK rekey data */
+	u8 kck[NL80211_KCK_LEN], kek[NL80211_KEK_LEN];
+	__le64 replay_ctr;
+	__le16 last_seq_ctl;
+	bool have_rekey_data;
 }; /*iwl_priv */
 
 static inline void iwl_txq_ctx_activate(struct iwl_priv *priv, int txq_id)

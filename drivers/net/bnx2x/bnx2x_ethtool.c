@@ -1503,6 +1503,7 @@ static int bnx2x_run_loopback(struct bnx2x *bp, int loopback_mode, u8 link_up)
 	unsigned char *packet;
 	struct bnx2x_fastpath *fp_rx = &bp->fp[0];
 	struct bnx2x_fastpath *fp_tx = &bp->fp[0];
+	struct bnx2x_fp_txdata *txdata = &fp_tx->txdata[0];
 	u16 tx_start_idx, tx_idx;
 	u16 rx_start_idx, rx_idx;
 	u16 pkt_prod, bd_prod;
@@ -1610,7 +1611,7 @@ static int bnx2x_run_loopback(struct bnx2x *bp, int loopback_mode, u8 link_up)
 		 * bnx2x_tx_int()), as both are taking netif_tx_lock().
 		 */
 		local_bh_disable();
-		bnx2x_tx_int(fp_tx);
+		bnx2x_tx_int(bp, txdata);
 		local_bh_enable();
 	}
 

@@ -597,6 +597,26 @@ int bnx2x_dcbnl_update_applist(struct bnx2x *bp, bool delall)
 }
 #endif
 
+static inline void bnx2x_dcbx_update_tc_mapping(struct bnx2x *bp)
+{
+	u8 prio, cos;
+	for (cos = 0; cos < bp->dcbx_port_params.ets.num_of_cos; cos++) {
+		for (prio = 0; prio < BNX2X_MAX_PRIORITY; prio++) {
+			if (bp->dcbx_port_params.ets.cos_params[cos].pri_bitmask
+			    & (1 << prio)) {
+				bp->prio_to_cos[prio] = cos;
+			}
+		}
+	}
+
+	/* setup tc must be called under rtnl lock, but we can't take it here
+	 * as we are handling an attetntion on a work queue which must be
+	 * flushed at some rtnl-locked contexts (e.g. if down)
+	 */
+	if (!test_and_set_bit(BNX2X_SP_RTNL_SETUP_TC, &bp->sp_rtnl_state))
+		schedule_delayed_work(&bp->sp_rtnl_task, 0);
+}
+
 void bnx2x_dcbx_set_params(struct bnx2x *bp, u32 state)
 {
 	switch (state) {
