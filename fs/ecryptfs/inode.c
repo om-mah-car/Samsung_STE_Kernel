@@ -201,7 +201,7 @@ ecryptfs_do_create(struct inode *directory_inode,
 		   struct dentry *ecryptfs_dentry, int mode,
 		   struct nameidata *nd)
 {
-	int rc;
+	int inode, rc;
 	struct dentry *lower_dentry;
 	struct dentry *lower_dir_dentry;
 
@@ -290,7 +290,7 @@ static int ecryptfs_initialize_file(struct dentry *ecryptfs_dentry,
 					| ECRYPTFS_ENCRYPTED);
 			ecryptfs_put_lower_file(ecryptfs_dentry->d_inode);
 		} else {
-			rc = ecryptfs_write_metadata(ecryptfs_dentry);
+			rc = ecryptfs_write_metadata(ecryptfs_dentry, ecryptfs_inode);
 			if (rc)
 				printk(
 				KERN_ERR "Error writing headers; rc = [%d]\n"
@@ -322,7 +322,7 @@ out:
  */
 static int
 ecryptfs_create(struct inode *directory_inode, struct dentry *ecryptfs_dentry,
-		int mode, struct nameidata *nd)
+		int mode, struct nameidata *nd, struct inode *ecryptfs_inode)
 {
 	int rc;
 
@@ -335,7 +335,7 @@ ecryptfs_create(struct inode *directory_inode, struct dentry *ecryptfs_dentry,
 	}
 	/* At this point, a file exists on "disk"; we need to make sure
 	 * that this on disk file is prepared to be an ecryptfs file */
-	rc = ecryptfs_initialize_file(ecryptfs_dentry);
+	rc = ecryptfs_initialize_file(ecryptfs_dentry, ecryptfs_inode);
 out:
 	return rc;
 }

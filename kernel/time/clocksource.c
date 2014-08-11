@@ -510,23 +510,6 @@ static u32 clocksource_max_adjustment(struct clocksource *cs)
 }
 
 /**
- *
- * clocksource_max_adjustment- Returns max adjustment amount
- * @cs: Pointer to clocksource
- *
- */
-static u32 clocksource_max_adjustment(struct clocksource *cs)
-{
-	u64 ret;
-	/*
-	 * We won't try to correct for more then 11% adjustments (110,000 ppm),
-	 */
-	ret = (u64)cs->mult * 11;
-	do_div(ret,100);
-	return (u32)ret;
-}
-
-/**
  * clocksource_max_deferment - Returns max time the clocksource can be deferred
  * @cs:         Pointer to clocksource
  *

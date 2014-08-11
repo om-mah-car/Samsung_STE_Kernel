@@ -149,6 +149,7 @@ static struct dst_entry *ipv4_negative_advice(struct dst_entry *dst);
 static void		 ipv4_link_failure(struct sk_buff *skb);
 static void		 ip_rt_update_pmtu(struct dst_entry *dst, u32 mtu);
 static int rt_garbage_collect(struct dst_ops *ops);
+static void check_peer_pmtu(struct dst_entry *dst, struct inet_peer *peer);
 
 static void ipv4_dst_ifdown(struct dst_entry *dst, struct net_device *dev,
 			    int how)
@@ -1109,6 +1110,27 @@ static int slow_chain_length(const struct rtable *head)
 	return length >> FRACT_BITS;
 }
 
+static struct neighbour *ipv4_neigh_lookup(const struct dst_entry *dst, const void *daddr)
+{
+	struct neigh_table *tbl = &arp_tbl;
+	static const __be32 inaddr_any = 0;
+	struct net_device *dev = dst->dev;
+	const __be32 *pkey = daddr;
+	struct neighbour *n;
+
+#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
+	if (dev->type == ARPHRD_ATM)
+		tbl = clip_tbl_hook;
+#endif
+	if (dev->flags & (IFF_LOOPBACK | IFF_POINTOPOINT))
+		pkey = &inaddr_any;
+	
+	n = __ipv4_neigh_lookup(tbl, dev, *(__force u32 *)pkey);
+	if (n)
+		return n;
+	return neigh_create(tbl, pkey, dev);
+}
+
 static struct rtable *rt_intern_hash(unsigned hash, struct rtable *rt,
 				     struct sk_buff *skb, int ifindex)
 {
@@ -1371,32 +1393,61 @@ static void rt_del(unsigned hash, struct rtable *rt)
 	spin_unlock_bh(rt_hash_lock_addr(hash));
 }
 
-static void check_peer_redir(struct dst_entry *dst, struct inet_peer *peer)
+static int check_peer_redir(struct dst_entry *dst, struct inet_peer *peer)
 {
-	struct rtable *rt = (struct rtable *) dst;
-	__be32 orig_gw = rt->rt_gateway;
-	struct neighbour *n, *old_n;
+        struct rtable *rt = (struct rtable *) dst;
+        __be32 orig_gw = rt->rt_gateway;
+        struct neighbour *n, *old_n;
 
-	dst_confirm(&rt->dst);
+        dst_confirm(&rt->dst);
 
-	rt->rt_gateway = peer->redirect_learned.a4;
+        rt->rt_gateway = peer->redirect_learned.a4;
 
-	n = ipv4_neigh_lookup(&rt->dst, &rt->rt_gateway);
-	if (IS_ERR(n)) {
-		rt->rt_gateway = orig_gw;
-		return;
-	}
-	old_n = xchg(&rt->dst._neighbour, n);
-	if (old_n)
-		neigh_release(old_n);
-	if (!(n->nud_state & NUD_VALID)) {
-		neigh_event_send(n, NULL);
-	} else {
-		rt->rt_flags |= RTCF_REDIRECTED;
-		call_netevent_notifiers(NETEVENT_NEIGH_UPDATE, n);
-	}
+        n = ipv4_neigh_lookup(&rt->dst, &rt->rt_gateway);
+        if (IS_ERR(n))
+                return PTR_ERR(n);
+        old_n = xchg(&rt->dst._neighbour, n);
+        if (old_n)
+                neigh_release(old_n);
+        if (!n || !(n->nud_state & NUD_VALID)) {
+                if (n)
+                        neigh_event_send(n, NULL);
+                rt->rt_gateway = orig_gw;
+                return -EAGAIN;
+        } else {
+                rt->rt_flags |= RTCF_REDIRECTED;
+                call_netevent_notifiers(NETEVENT_NEIGH_UPDATE, n);
+        }
+        return 0;
 }
 
+static struct dst_entry *ipv4_dst_check(struct dst_entry *dst, u32 cookie)
+{
+	struct rtable *rt = (struct rtable *) dst;
+
+	if (rt_is_expired(rt))
+		return NULL;
+	if (rt->rt_peer_genid != rt_peer_genid()) {
+		struct inet_peer *peer;
+
+		if (!rt->peer)
+			rt_bind_peer(rt, rt->rt_dst, 0);
+
+		peer = rt->peer;
+		if (peer) {
+			check_peer_pmtu(dst, peer);
+
+			if (peer->redirect_learned.a4 &&
+			    peer->redirect_learned.a4 != rt->rt_gateway) {
+				if (check_peer_redir(dst, peer))
+					return NULL;
+			}
+		}
+
+		rt->rt_peer_genid = rt_peer_genid();
+	}
+		return dst;
+}
 
 /* called in rcu_read_lock() section */
 void ip_rt_redirect(__be32 old_gw, __be32 daddr, __be32 new_gw,
@@ -1748,39 +1799,6 @@ static void ip_rt_update_pmtu(struct dst_entry *dst, u32 mtu)
 		}
 		check_peer_pmtu(dst, peer);
 	}
-}
-
-static void ipv4_validate_peer(struct rtable *rt)
-{
-	if (rt->rt_peer_genid != rt_peer_genid()) {
-		struct inet_peer *peer;
-
-		if (!rt->peer)
-			rt_bind_peer(rt, rt->rt_dst, 0);
-
-		peer = rt->peer;
-		if (peer) {
-			check_peer_pmtu(&rt->dst, peer);
-
-			if (peer->redirect_genid != redirect_genid)
-				peer->redirect_learned.a4 = 0;
-			if (peer->redirect_learned.a4 &&
-			    peer->redirect_learned.a4 != rt->rt_gateway)
-				check_peer_redir(&rt->dst, peer);
-		}
-
-		rt->rt_peer_genid = rt_peer_genid();
-	}
-}
-
-static struct dst_entry *ipv4_dst_check(struct dst_entry *dst, u32 cookie)
-{
-	struct rtable *rt = (struct rtable *) dst;
-
-	if (rt_is_expired(rt))
-		return NULL;
-	ipv4_validate_peer(rt);
-	return dst;
 }
 
 static void ipv4_dst_destroy(struct dst_entry *dst)
@@ -2429,7 +2447,6 @@ int ip_route_input_common(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 		    rth->rt_mark == skb->mark &&
 		    net_eq(dev_net(rth->dst.dev), net) &&
 		    !rt_is_expired(rth)) {
-			ipv4_validate_peer(rth);
 			if (noref) {
 				dst_use_noref(&rth->dst, jiffies);
 				skb_dst_set_noref(skb, &rth->dst);
@@ -2805,7 +2822,6 @@ struct rtable *__ip_route_output_key(struct net *net, struct flowi4 *flp4)
 			    (IPTOS_RT_MASK | RTO_ONLINK)) &&
 		    net_eq(dev_net(rth->dst.dev), net) &&
 		    !rt_is_expired(rth)) {
-			ipv4_validate_peer(rth);
 			dst_use(&rth->dst, jiffies);
 			RT_CACHE_STAT_INC(out_hit);
 			rcu_read_unlock_bh();
