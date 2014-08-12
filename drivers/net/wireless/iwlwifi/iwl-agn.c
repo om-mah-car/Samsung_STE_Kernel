@@ -2843,6 +2843,17 @@ static int iwlagn_mac_suspend(struct ieee80211_hw *hw,
 
 	memset(&wakeup_filter_cmd, 0, sizeof(wakeup_filter_cmd));
 
+	switch (key->cipher) {
+	case WLAN_CIPHER_SUITE_TKIP:
+		key->flags |= IEEE80211_KEY_FLAG_GENERATE_MMIC;
+		/* fall through */
+	case WLAN_CIPHER_SUITE_CCMP:
+		key->flags |= IEEE80211_KEY_FLAG_GENERATE_IV;
+		break;
+	default:
+		break;
+	}
+
 	/*
 	 * We know the last used seqno, and the uCode expects to know that
 	 * one, it will increment before TX.
