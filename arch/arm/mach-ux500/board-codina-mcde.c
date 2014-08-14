@@ -10,6 +10,8 @@
 #include <linux/platform_device.h>
 #include <linux/kernel.h>
 #include <linux/gpio.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 #include <linux/compdev.h>
 #include <linux/clk.h>
 #include <mach/devices.h>
@@ -26,6 +28,8 @@
 #include "pins-db8500.h"
 #include "pins.h"
 #include <mach/db8500-regs.h>
+#include "../../../drivers/video/mcde/mcde_hw.h"
+#include "../../../drivers/video/mcde/mcde_regs.h"
 #include <linux/mfd/dbx500-prcmu.h>
 #include <linux/ktime.h>
 
@@ -40,6 +44,7 @@
 
 #define PRCMU_DPI_CLK_SHARP_FREQ	30720000
 #define PRCMU_DPI_CLK_SMD_FREQ		62400000
+#define PRI_LCD_PWR_DEF 1500000
 
 enum {
 	PRIMARY_DISPLAY_ID,
@@ -51,6 +56,8 @@ static int display_initialized_during_boot = (int)false;
 static struct ux500_pins *dpi_pins;
 
 static struct fb_info *primary_fbi;
+
+static int dpi_clk_freq;
 
 static int __init startup_graphics_setup(char *str)
 {
@@ -169,15 +176,15 @@ static void pri_lcd_pwr_setup(struct device *dev)
 	if (system_rev > CODINA_TMO_R0_4) {
 
 		int ret;
-		int min_uV, max_uV;
-
-		min_uV = max_uV = 1800000;
+		int min, max;
+		
 		vreg_lcd_1v8_regulator = regulator_get(dev, "v_lcd_1v8");
 		if (IS_ERR(vreg_lcd_1v8_regulator)) {
 			ret = PTR_ERR(vreg_lcd_1v8_regulator);
 			return;
 		}
-		ret = regulator_set_voltage(vreg_lcd_1v8_regulator, min_uV, max_uV);
+		min = max = PRI_LCD_PWR_DEF;
+		ret = regulator_set_voltage(vreg_lcd_1v8_regulator, min, max);
 		printk("lcd_pwr_setup_regulator setup =[%d]",ret);
 		ret = regulator_enable(vreg_lcd_1v8_regulator);
 		if (ret < 0) {
@@ -407,6 +414,124 @@ if ((reqs->num_rot_channels && reqs->num_overlays > 1) ||
 	
 }
 
+#define ATTR_RO(_name)	\
+	static struct kobj_attribute _name##_interface = __ATTR(_name, 0444, _name##_show, NULL);
+
+#define ATTR_WO(_name)	\
+	static struct kobj_attribute _name##_interface = __ATTR(_name, 0220, NULL, _name##_store);
+
+#define ATTR_RW(_name)	\
+	static struct kobj_attribute _name##_interface = __ATTR(_name, 0644, _name##_show, _name##_store);
+
+static ssize_t mcde_version_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	u32 pid;
+	pid = mcde_rreg(MCDE_PID);
+	int major, middle, minor;
+	major = (pid & 0xFF000000) >> 24;
+	middle = (pid & 0x00FF0000) >> 16;
+	minor = (pid & 0x0000FF00) >> 8;
+	return sprintf(buf, "%d.%d.%d\n", major, middle, minor);
+}
+ATTR_RO(mcde_version);
+
+static ssize_t prcmu_dpi_clk_freq_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", port0.phy.dpi.lcd_freq);
+}
+
+/*
+static ssize_t prcmu_dpi_clk_freq_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	if (sscanf(buf, "%u", &dpi_clk_freq)) {
+		//port->phy.dpi.lcd_freq = 
+		//port0.phy.dpi.lcd_freq = dpi_clk_freq;
+		//generic_display0.port = &port0;
+		//generic_display0.port.phy.dpi.lcd_freq = dpi_clk_freq;
+		pr_err("[MCDE] set %u uHz\n", port0.phy.dpi.lcd_freq);
+		//mcde_display_device_unregister(&generic_display0);
+
+		//msleep(1);
+		
+		//ret = mcde_display_device_register(&generic_display0);
+		//if (ret)
+		//	pr_err("[MCDE] Failed to register generic display device 0\n");
+		//pri_display_reset(codina_dpi_pri_display_info);
+		
+		return count;
+	}
+		
+	return -EINVAL;
+}
+*/
+ATTR_RO(prcmu_dpi_clk_freq);
+
+/*
+static ssize_t mcde_version_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+}
+*/
+
+static ssize_t mcde_voltage_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+/*
+	if (IS_ERR(vreg_lcd_1v8_regulator_copy)) {
+		  ret = PTR_ERR(vreg_lcd_1v8_regulator_copy);
+		  pr_err("[MCDE] could not get regulator [ret=%d]\n", ret);
+		  return sprintf(buf, "Error %d\n", ret);
+	}
+	else    {
+		  uV = regulator_get_voltage(vreg_lcd_1v8_regulator_copy);
+	}*/
+
+	return sprintf(buf, "%d\n", PRI_LCD_PWR_DEF);
+}
+
+/*
+static ssize_t mcde_voltage_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	
+	if (sscanf(buf, "%d", &pri_lcd_pwr)) {
+		int ret;
+		
+		if (IS_ERR(vreg_lcd_1v8_regulator_copy)) {
+			ret = PTR_ERR(vreg_lcd_1v8_regulator_copy);
+			pr_err("[MCDE] could not get regulator [ret=%d]\n", ret);
+			return count;
+		}
+		else	{
+		  	ret = regulator_set_voltage(vreg_lcd_1v8_regulator_copy, pri_lcd_pwr, pri_lcd_pwr);
+			if (ret < 0)
+				pr_err("[MCDE] could not set voltage to %d uV\n", pri_lcd_pwr);
+			else pr_err("[MCDE] set voltage to %d uV\n", pri_lcd_pwr);
+		}
+
+		//printk("lcd_pwr_setup_regulator setup =[%d]",ret);
+	}
+	else {
+	      pr_err("[MCDE] sscanf error\n");
+	}
+	return count;
+}
+*/
+ATTR_RO(mcde_voltage);
+
+static struct attribute *mcde_attrs[] = {
+	//&mali_dvfs_config_interface.attr, 
+	&mcde_voltage_interface.attr, 
+	&prcmu_dpi_clk_freq_interface.attr,
+	&mcde_version_interface.attr,
+	NULL,
+};
+
+static struct attribute_group mcde_interface_group = {
+	 /* .name  = "governor", */ /* Not using subfolder now */
+	.attrs = mcde_attrs,
+};
+
+static struct kobject *mcde_kobject;
+
 int __init init_codina_display_devices(void)
 {
 	int ret;
@@ -427,11 +552,13 @@ int __init init_codina_display_devices(void)
 	 * space.
 	 */
 	if (lcd_type == LCD_PANEL_TYPE_SMD) {
+		dpi_clk_freq = PRCMU_DPI_CLK_SMD_FREQ;
 		port0.phy.dpi.clock_div = 2;
 		port0.phy.dpi.lcd_freq = PRCMU_DPI_CLK_SMD_FREQ;
 		codina_dpi_pri_display_info.video_mode.pixclock	=
 				(int)(1e+12 * (1.0 / PRCMU_DPI_CLK_SMD_FREQ));
 	} else {
+		dpi_clk_freq = PRCMU_DPI_CLK_SHARP_FREQ;
 		port0.phy.dpi.clock_div = 1;
 		port0.phy.dpi.lcd_freq = PRCMU_DPI_CLK_SHARP_FREQ;
 		codina_dpi_pri_display_info.video_mode.pixclock	=
@@ -487,6 +614,16 @@ int __init init_codina_display_devices(void)
 	dpi_pins = ux500_pins_get("mcde-dpi");
 	if (!dpi_pins)
 		return -EINVAL;
+	
+	mcde_kobject = kobject_create_and_add("mcde", kernel_kobj);
+	if (!mcde_kobject) {
+		pr_err("[MCDE] Failed to create kobject interface\n");
+	}
+
+	ret = sysfs_create_group(mcde_kobject, &mcde_interface_group);
+	if (ret) {
+		kobject_put(mcde_kobject);
+	}
 error:
 	return ret;
 }

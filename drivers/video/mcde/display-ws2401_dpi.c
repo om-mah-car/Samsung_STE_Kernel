@@ -51,7 +51,7 @@
 #define LDI_STATE_ON		1
 #define LDI_STATE_OFF		0
 /* Taken from the programmed value of the LCD clock in PRCMU */
-#define PIX_CLK_FREQ		25000000
+#define PIX_CLK_FREQ		50000000
 #define VMODE_XRES		480
 #define VMODE_YRES		800
 #define POWER_IS_ON(pwr)	((pwr) <= FB_BLANK_NORMAL)
